@@ -8,8 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[repr(packed)]
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 struct Foo {
     a: i8,
     b: i16,

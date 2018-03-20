@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Regression test for #20797.
+// ignore-cloudabi no std::fs
 
-// pretty-expanded FIXME #23616
+// Regression test for #20797.
 
 use std::default::Default;
 use std::io;
@@ -55,7 +55,7 @@ pub struct Subpaths<S: Strategy> {
 impl<S: Strategy> Subpaths<S> {
     /// Create a directory walker with a root path and strategy.
     pub fn new(p: &S::P, strategy: S) -> io::Result<Subpaths<S>> {
-        let stack = try!(strategy.get_more(p));
+        let stack = strategy.get_more(p)?;
         Ok(Subpaths { stack: stack, strategy: strategy })
     }
 }

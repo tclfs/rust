@@ -15,7 +15,7 @@
 //! standard implementations, it should be possible for two libraries to
 //! communicate without significant data conversion.
 //!
-//! To get this out of the way: you should probably just use `Vec` or `HashMap`.
+//! To get this out of the way: you should probably just use [`Vec`] or [`HashMap`].
 //! These two collections cover most use cases for generic data storage and
 //! processing. They are exceptionally good at doing what they do. All the other
 //! collections in the standard library have specific use cases where they are
@@ -25,10 +25,10 @@
 //!
 //! Rust's collections can be grouped into four major categories:
 //!
-//! * Sequences: `Vec`, `VecDeque`, `LinkedList`
-//! * Maps: `HashMap`, `BTreeMap`
-//! * Sets: `HashSet`, `BTreeSet`
-//! * Misc: `BinaryHeap`
+//! * Sequences: [`Vec`], [`VecDeque`], [`LinkedList`]
+//! * Maps: [`HashMap`], [`BTreeMap`]
+//! * Sets: [`HashSet`], [`BTreeSet`]
+//! * Misc: [`BinaryHeap`]
 //!
 //! # When Should You Use Which Collection?
 //!
@@ -46,13 +46,13 @@
 //! * You want a heap-allocated array.
 //!
 //! ### Use a `VecDeque` when:
-//! * You want a `Vec` that supports efficient insertion at both ends of the
+//! * You want a [`Vec`] that supports efficient insertion at both ends of the
 //!   sequence.
 //! * You want a queue.
 //! * You want a double-ended queue (deque).
 //!
 //! ### Use a `LinkedList` when:
-//! * You want a `Vec` or `VecDeque` of unknown size, and can't tolerate
+//! * You want a [`Vec`] or [`VecDeque`] of unknown size, and can't tolerate
 //!   amortization.
 //! * You want to efficiently split and append lists.
 //! * You are *absolutely* certain you *really*, *truly*, want a doubly linked
@@ -64,11 +64,11 @@
 //! * You want a map, with no extra functionality.
 //!
 //! ### Use a `BTreeMap` when:
+//! * You want a map sorted by its keys.
+//! * You want to be able to get a range of entries on-demand.
 //! * You're interested in what the smallest or largest key-value pair is.
 //! * You want to find the largest or smallest key that is smaller or larger
 //!   than something.
-//! * You want to be able to get all of the entries in order on-demand.
-//! * You want a sorted map.
 //!
 //! ### Use the `Set` variant of any of these `Map`s when:
 //! * You just want to remember which keys you've seen.
@@ -92,40 +92,38 @@
 //! Throughout the documentation, we will follow a few conventions. For all
 //! operations, the collection's size is denoted by n. If another collection is
 //! involved in the operation, it contains m elements. Operations which have an
-//! *amortized* cost are suffixed with a `*`.  Operations with an *expected*
+//! *amortized* cost are suffixed with a `*`. Operations with an *expected*
 //! cost are suffixed with a `~`.
 //!
 //! All amortized costs are for the potential need to resize when capacity is
-//! exhausted.  If a resize occurs it will take O(n) time. Our collections never
+//! exhausted. If a resize occurs it will take O(n) time. Our collections never
 //! automatically shrink, so removal operations aren't amortized. Over a
 //! sufficiently large series of operations, the average cost per operation will
 //! deterministically equal the given cost.
 //!
-//! Only HashMap has expected costs, due to the probabilistic nature of hashing.
-//! It is theoretically possible, though very unlikely, for HashMap to
+//! Only [`HashMap`] has expected costs, due to the probabilistic nature of hashing.
+//! It is theoretically possible, though very unlikely, for [`HashMap`] to
 //! experience worse performance.
 //!
 //! ## Sequences
 //!
-//! |              | get(i)         | insert(i)       | remove(i)      | append | split_off(i)   |
-//! |--------------|----------------|-----------------|----------------|--------|----------------|
-//! | Vec          | O(1)           | O(n-i)*         | O(n-i)         | O(m)*  | O(n-i)         |
-//! | VecDeque     | O(1)           | O(min(i, n-i))* | O(min(i, n-i)) | O(m)*  | O(min(i, n-i)) |
-//! | LinkedList   | O(min(i, n-i)) | O(min(i, n-i))  | O(min(i, n-i)) | O(1)   | O(min(i, n-i)) |
+//! |                | get(i)         | insert(i)       | remove(i)      | append | split_off(i)   |
+//! |----------------|----------------|-----------------|----------------|--------|----------------|
+//! | [`Vec`]        | O(1)           | O(n-i)*         | O(n-i)         | O(m)*  | O(n-i)         |
+//! | [`VecDeque`]   | O(1)           | O(min(i, n-i))* | O(min(i, n-i)) | O(m)*  | O(min(i, n-i)) |
+//! | [`LinkedList`] | O(min(i, n-i)) | O(min(i, n-i))  | O(min(i, n-i)) | O(1)   | O(min(i, n-i)) |
 //!
-//! Note that where ties occur, Vec is generally going to be faster than VecDeque, and VecDeque
-//! is generally going to be faster than LinkedList.
+//! Note that where ties occur, [`Vec`] is generally going to be faster than [`VecDeque`], and
+//! [`VecDeque`] is generally going to be faster than [`LinkedList`].
 //!
 //! ## Maps
 //!
 //! For Sets, all operations have the cost of the equivalent Map operation.
 //!
-//! |          | get       | insert   | remove   | predecessor |
-//! |----------|-----------|----------|----------|-------------|
-//! | HashMap  | O(1)~     | O(1)~*   | O(1)~    | N/A         |
-//! | BTreeMap | O(log n)  | O(log n) | O(log n) | O(log n)    |
-//!
-//! Note that BTreeMap's precise performance depends on the value of B.
+//! |              | get       | insert   | remove   | predecessor | append |
+//! |--------------|-----------|----------|----------|-------------|--------|
+//! | [`HashMap`]  | O(1)~     | O(1)~*   | O(1)~    | N/A         | N/A    |
+//! | [`BTreeMap`] | O(log n)  | O(log n) | O(log n) | O(log n)    | O(n+m) |
 //!
 //! # Correct and Efficient Usage of Collections
 //!
@@ -138,7 +136,7 @@
 //! ## Capacity Management
 //!
 //! Many collections provide several constructors and methods that refer to
-//! "capacity".  These collections are generally built on top of an array.
+//! "capacity". These collections are generally built on top of an array.
 //! Optimally, this array would be exactly the right size to fit only the
 //! elements stored in the collection, but for the collection to do this would
 //! be very inefficient. If the backing array was exactly the right size at all
@@ -162,25 +160,25 @@
 //! Any `with_capacity` constructor will instruct the collection to allocate
 //! enough space for the specified number of elements. Ideally this will be for
 //! exactly that many elements, but some implementation details may prevent
-//! this. `Vec` and `VecDeque` can be relied on to allocate exactly the
+//! this. [`Vec`] and [`VecDeque`] can be relied on to allocate exactly the
 //! requested amount, though. Use `with_capacity` when you know exactly how many
 //! elements will be inserted, or at least have a reasonable upper-bound on that
 //! number.
 //!
 //! When anticipating a large influx of elements, the `reserve` family of
 //! methods can be used to hint to the collection how much room it should make
-//! for the coming items.  As with `with_capacity`, the precise behavior of
+//! for the coming items. As with `with_capacity`, the precise behavior of
 //! these methods will be specific to the collection of interest.
 //!
 //! For optimal performance, collections will generally avoid shrinking
-//! themselves.  If you believe that a collection will not soon contain any more
+//! themselves. If you believe that a collection will not soon contain any more
 //! elements, or just really need the memory, the `shrink_to_fit` method prompts
 //! the collection to shrink the backing array to the minimum size capable of
 //! holding its elements.
 //!
 //! Finally, if ever you're interested in what the actual capacity of the
 //! collection is, most collections provide a `capacity` method to query this
-//! information on demand.  This can be useful for debugging purposes, or for
+//! information on demand. This can be useful for debugging purposes, or for
 //! use with the `reserve` methods.
 //!
 //! ## Iterators
@@ -201,10 +199,10 @@
 //! unreasonable to provide them.
 //!
 //! `iter` provides an iterator of immutable references to all the contents of a
-//! collection in the most "natural" order. For sequence collections like `Vec`,
+//! collection in the most "natural" order. For sequence collections like [`Vec`],
 //! this means the items will be yielded in increasing order of index starting
-//! at 0. For ordered collections like `BTreeMap`, this means that the items
-//! will be yielded in sorted order.  For unordered collections like `HashMap`,
+//! at 0. For ordered collections like [`BTreeMap`], this means that the items
+//! will be yielded in sorted order. For unordered collections like [`HashMap`],
 //! the items will be yielded in whatever order the internal representation made
 //! most convenient. This is great for reading through all the contents of the
 //! collection.
@@ -217,7 +215,7 @@
 //! ```
 //!
 //! `iter_mut` provides an iterator of *mutable* references in the same order as
-//! `iter`.  This is great for mutating all the contents of the collection.
+//! `iter`. This is great for mutating all the contents of the collection.
 //!
 //! ```
 //! let mut vec = vec![1, 2, 3, 4];
@@ -230,7 +228,7 @@
 //! contents by-value. This is great when the collection itself is no longer
 //! needed, and the values are needed elsewhere. Using `extend` with `into_iter`
 //! is the main way that contents of one collection are moved into another.
-//! `extend` automatically calls `into_iter`, and takes any `T: IntoIterator`.
+//! `extend` automatically calls `into_iter`, and takes any `T: `[`IntoIterator`].
 //! Calling `collect` on an iterator itself is also a great way to convert one
 //! collection into another. Both of these methods should internally use the
 //! capacity management tools discussed in the previous section to do this as
@@ -251,7 +249,7 @@
 //!
 //! Iterators also provide a series of *adapter* methods for performing common
 //! threads to sequences. Among the adapters are functional favorites like `map`,
-//! `fold`, `skip`, and `take`. Of particular interest to collections is the
+//! `fold`, `skip` and `take`. Of particular interest to collections is the
 //! `rev` adapter, that reverses any iterator that supports this operation. Most
 //! collections provide reversible iterators as the way to iterate over them in
 //! reverse order.
@@ -293,7 +291,7 @@
 //! just inserted.
 //!
 //! If an `Occupied(entry)` is yielded, then the key *was* found. In this case,
-//! the user has several options: they can `get`, `insert`, or `remove` the
+//! the user has several options: they can `get`, `insert` or `remove` the
 //! value of the occupied entry. Additionally, they can convert the occupied
 //! entry into a mutable reference to its value, providing symmetry to the
 //! vacant `insert` case.
@@ -324,7 +322,7 @@
 //! ```
 //!
 //! When the logic to be performed on the value is more complex, we may simply
-//! use the `entry` API to ensure that the value is initialized, and perform the
+//! use the `entry` API to ensure that the value is initialized and perform the
 //! logic afterwards.
 //!
 //! #### Tracking the inebriation of customers at a bar
@@ -362,7 +360,7 @@
 //!
 //! # Insert and complex keys
 //!
-//! If we have a more complex key, calls to `insert()` will
+//! If we have a more complex key, calls to `insert` will
 //! not update the value of the key. For example:
 //!
 //! ```
@@ -408,37 +406,53 @@
 //! // ...but the key hasn't changed. b is still "baz", not "xyz".
 //! assert_eq!(map.keys().next().unwrap().b, "baz");
 //! ```
+//!
+//! [`Vec`]: ../../std/vec/struct.Vec.html
+//! [`HashMap`]: ../../std/collections/struct.HashMap.html
+//! [`VecDeque`]: ../../std/collections/struct.VecDeque.html
+//! [`LinkedList`]: ../../std/collections/struct.LinkedList.html
+//! [`BTreeMap`]: ../../std/collections/struct.BTreeMap.html
+//! [`HashSet`]: ../../std/collections/struct.HashSet.html
+//! [`BTreeSet`]: ../../std/collections/struct.BTreeSet.html
+//! [`BinaryHeap`]: ../../std/collections/struct.BinaryHeap.html
+//! [`IntoIterator`]: ../../std/iter/trait.IntoIterator.html
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core_collections::Bound;
+pub use alloc::Bound;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core_collections::{BinaryHeap, BTreeMap, BTreeSet};
+pub use alloc::{BinaryHeap, BTreeMap, BTreeSet};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core_collections::{LinkedList, VecDeque};
+pub use alloc::{LinkedList, VecDeque};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core_collections::{binary_heap, btree_map, btree_set};
+pub use alloc::{binary_heap, btree_map, btree_set};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core_collections::{linked_list, vec_deque};
+pub use alloc::{linked_list, vec_deque};
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::hash_map::HashMap;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::hash_set::HashSet;
 
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use alloc::range;
+
+#[unstable(feature = "try_reserve", reason = "new API", issue="48043")]
+pub use alloc::allocator::CollectionAllocErr;
+
 mod hash;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub mod hash_map {
-    //! A hashmap
+    //! A hash map implemented with linear probing and Robin Hood bucket stealing.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub use super::hash::map::*;
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub mod hash_set {
-    //! A hashset
+    //! A hash set implemented as a `HashMap` where the value is `()`.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub use super::hash::set::*;
 }

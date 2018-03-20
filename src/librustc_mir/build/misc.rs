@@ -12,25 +12,26 @@
 //! kind of thing.
 
 use build::Builder;
-use rustc::middle::ty::Ty;
-use rustc::mir::repr::*;
-use std::u32;
-use syntax::codemap::Span;
 
-impl<'a,'tcx> Builder<'a,'tcx> {
+use rustc::middle::const_val::ConstVal;
+use rustc::ty::{self, Ty};
+use rustc::mir::interpret::{Value, PrimVal};
+
+use rustc::mir::*;
+use syntax_pos::{Span, DUMMY_SP};
+
+impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Add a new temporary value of type `ty` storing the result of
     /// evaluating `expr`.
     ///
     /// NB: **No cleanup is scheduled for this temporary.** You should
     /// call `schedule_drop` once the temporary is initialized.
-    pub fn temp(&mut self, ty: Ty<'tcx>) -> Lvalue<'tcx> {
-        let index = self.temp_decls.len();
-        self.temp_decls.push(TempDecl { ty: ty });
-        assert!(index < (u32::MAX) as usize);
-        let lvalue = Lvalue::Temp(index as u32);
+    pub fn temp(&mut self, ty: Ty<'tcx>, span: Span) -> Place<'tcx> {
+        let temp = self.local_decls.push(LocalDecl::new_temp(ty, span));
+        let place = Place::Local(temp);
         debug!("temp: created temp {:?} with type {:?}",
-               lvalue, self.temp_decls.last().unwrap().ty);
-        lvalue
+               place, self.local_decls[temp].ty);
+        place
     }
 
     pub fn literal_operand(&mut self,
@@ -38,24 +39,64 @@ impl<'a,'tcx> Builder<'a,'tcx> {
                            ty: Ty<'tcx>,
                            literal: Literal<'tcx>)
                            -> Operand<'tcx> {
-        let constant = Constant {
-            span: span,
-            ty: ty,
-            literal: literal,
+        let constant = box Constant {
+            span,
+            ty,
+            literal,
         };
         Operand::Constant(constant)
     }
 
-    pub fn push_usize(&mut self, block: BasicBlock, span: Span, value: u64) -> Lvalue<'tcx> {
+    pub fn unit_rvalue(&mut self) -> Rvalue<'tcx> {
+        Rvalue::Aggregate(box AggregateKind::Tuple, vec![])
+    }
+
+    // Returns a zero literal operand for the appropriate type, works for
+    // bool, char and integers.
+    pub fn zero_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {
+        match ty.sty {
+            ty::TyBool |
+            ty::TyChar |
+            ty::TyUint(_) |
+            ty::TyInt(_) => {}
+            _ => {
+                span_bug!(span, "Invalid type for zero_literal: `{:?}`", ty)
+            }
+        }
+        let literal = Literal::Value {
+            value: self.hir.tcx().mk_const(ty::Const {
+                val: ConstVal::Value(Value::ByVal(PrimVal::Bytes(0))),
+                ty
+            })
+        };
+
+        self.literal_operand(span, ty, literal)
+    }
+
+    pub fn push_usize(&mut self,
+                      block: BasicBlock,
+                      source_info: SourceInfo,
+                      value: u64)
+                      -> Place<'tcx> {
         let usize_ty = self.hir.usize_ty();
-        let temp = self.temp(usize_ty);
+        let temp = self.temp(usize_ty, source_info.span);
         self.cfg.push_assign_constant(
-            block, span, &temp,
+            block, source_info, &temp,
             Constant {
-                span: span,
+                span: source_info.span,
                 ty: self.hir.usize_ty(),
                 literal: self.hir.usize_literal(value),
             });
         temp
+    }
+
+    pub fn consume_by_copy_or_move(&self, place: Place<'tcx>) -> Operand<'tcx> {
+        let tcx = self.hir.tcx();
+        let ty = place.ty(&self.local_decls, tcx).to_ty(tcx);
+        if self.hir.type_moves_by_default(ty, DUMMY_SP) {
+            Operand::Move(place)
+        } else {
+            Operand::Copy(place)
+        }
     }
 }

@@ -7,7 +7,8 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-//
+
+// ignore-wasm32-bare no libc to test ffi with
 
 #[derive(Copy, Clone)]
 pub struct Quad { a: u64, b: u64, c: u64, d: u64 }
@@ -15,7 +16,7 @@ pub struct Quad { a: u64, b: u64, c: u64, d: u64 }
 mod rustrt {
     use super::Quad;
 
-    #[link(name = "rust_test_helpers")]
+    #[link(name = "rust_test_helpers", kind = "static")]
     extern {
         pub fn get_c_many_params(_: *const (), _: *const (),
                                  _: *const (), _: *const (), f: Quad) -> u64;

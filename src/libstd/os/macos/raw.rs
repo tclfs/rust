@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! MacOS-specific raw type definitions
+//! macOS-specific raw type definitions
 
 #![stable(feature = "raw_ext", since = "1.1.0")]
 #![rustc_deprecated(since = "1.8.0",
@@ -29,7 +29,8 @@ use os::raw::c_long;
 #[stable(feature = "raw_ext", since = "1.1.0")] pub type off_t = u64;
 #[stable(feature = "raw_ext", since = "1.1.0")] pub type time_t = i64;
 
-#[unstable(feature = "pthread_t", issue = "29791")] pub type pthread_t = usize;
+#[stable(feature = "pthread_t", since = "1.8.0")]
+pub type pthread_t = usize;
 
 #[repr(C)]
 #[derive(Clone)]

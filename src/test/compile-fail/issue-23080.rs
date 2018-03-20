@@ -12,14 +12,12 @@
 
 #![feature(optin_builtin_traits)]
 
-unsafe trait Trait {
-//~^ error: traits with default impls (`e.g. unsafe impl Trait for ..`) must have no methods or associated items
+unsafe auto trait Trait {
+//~^ ERROR E0380
     fn method(&self) {
         println!("Hello");
     }
 }
-
-unsafe impl Trait for .. {}
 
 fn call_method<T: Trait>(x: T) {
     x.method();

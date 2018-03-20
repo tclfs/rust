@@ -10,7 +10,9 @@
 
 #![allow(missing_copy_implementations)]
 
-use io::{self, Read, Write, ErrorKind, BufRead};
+use fmt;
+use io::{self, Read, Initializer, Write, ErrorKind, BufRead};
+use mem;
 
 /// Copies the entire contents of a reader into a writer.
 ///
@@ -36,17 +38,23 @@ use io::{self, Read, Write, ErrorKind, BufRead};
 /// let mut reader: &[u8] = b"hello";
 /// let mut writer: Vec<u8> = vec![];
 ///
-/// try!(io::copy(&mut reader, &mut writer));
+/// io::copy(&mut reader, &mut writer)?;
 ///
-/// assert_eq!(reader, &writer[..]);
+/// assert_eq!(&b"hello"[..], &writer[..]);
 /// # Ok(())
 /// # }
+/// # foo().unwrap();
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> io::Result<u64>
     where R: Read, W: Write
 {
-    let mut buf = [0; super::DEFAULT_BUF_SIZE];
+    let mut buf = unsafe {
+        let mut buf: [u8; super::DEFAULT_BUF_SIZE] = mem::uninitialized();
+        reader.initializer().initialize(&mut buf);
+        buf
+    };
+
     let mut written = 0;
     loop {
         let len = match reader.read(&mut buf) {
@@ -55,54 +63,68 @@ pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> io::Result<
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        try!(writer.write_all(&buf[..len]));
+        writer.write_all(&buf[..len])?;
         written += len as u64;
     }
 }
 
 /// A reader which is always at EOF.
 ///
-/// This struct is generally created by calling [`empty()`][empty]. Please see
-/// the documentation of `empty()` for more details.
+/// This struct is generally created by calling [`empty`]. Please see
+/// the documentation of [`empty()`][`empty`] for more details.
 ///
-/// [empty]: fn.empty.html
+/// [`empty`]: fn.empty.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Empty { _priv: () }
 
 /// Constructs a new handle to an empty reader.
 ///
-/// All reads from the returned reader will return `Ok(0)`.
+/// All reads from the returned reader will return [`Ok`]`(0)`.
+///
+/// [`Ok`]: ../result/enum.Result.html#variant.Ok
 ///
 /// # Examples
 ///
 /// A slightly sad example of not reading anything into a buffer:
 ///
 /// ```
-/// use std::io;
-/// use std::io::Read;
+/// use std::io::{self, Read};
 ///
-/// # fn foo() -> io::Result<String> {
 /// let mut buffer = String::new();
-/// try!(io::empty().read_to_string(&mut buffer));
-/// # Ok(buffer)
-/// # }
+/// io::empty().read_to_string(&mut buffer).unwrap();
+/// assert!(buffer.is_empty());
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn empty() -> Empty { Empty { _priv: () } }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Read for Empty {
+    #[inline]
     fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> { Ok(0) }
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
+    }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
 impl BufRead for Empty {
+    #[inline]
     fn fill_buf(&mut self) -> io::Result<&[u8]> { Ok(&[]) }
+    #[inline]
     fn consume(&mut self, _n: usize) {}
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Empty {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Empty { .. }")
+    }
 }
 
 /// A reader which yields one byte over and over and over and over and over and...
 ///
-/// This struct is generally created by calling [`repeat()`][repeat]. Please
+/// This struct is generally created by calling [`repeat`][repeat]. Please
 /// see the documentation of `repeat()` for more details.
 ///
 /// [repeat]: fn.repeat.html
@@ -113,22 +135,45 @@ pub struct Repeat { byte: u8 }
 ///
 /// All reads from this reader will succeed by filling the specified buffer with
 /// the given byte.
+///
+/// # Examples
+///
+/// ```
+/// use std::io::{self, Read};
+///
+/// let mut buffer = [0; 3];
+/// io::repeat(0b101).read_exact(&mut buffer).unwrap();
+/// assert_eq!(buffer, [0b101, 0b101, 0b101]);
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn repeat(byte: u8) -> Repeat { Repeat { byte: byte } }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Read for Repeat {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         for slot in &mut *buf {
             *slot = self.byte;
         }
         Ok(buf.len())
     }
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Repeat {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Repeat { .. }")
+    }
 }
 
 /// A writer which will move data into the void.
 ///
-/// This struct is generally created by calling [`sink()`][sink]. Please
+/// This struct is generally created by calling [`sink`][sink]. Please
 /// see the documentation of `sink()` for more details.
 ///
 /// [sink]: fn.sink.html
@@ -139,19 +184,36 @@ pub struct Sink { _priv: () }
 ///
 /// All calls to `write` on the returned instance will return `Ok(buf.len())`
 /// and the contents of the buffer will not be inspected.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::io::{self, Write};
+///
+/// let buffer = vec![1, 2, 3, 5, 8];
+/// let num_bytes = io::sink().write(&buffer).unwrap();
+/// assert_eq!(num_bytes, 5);
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn sink() -> Sink { Sink { _priv: () } }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for Sink {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { Ok(buf.len()) }
+    #[inline]
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Sink {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Sink { .. }")
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use prelude::v1::*;
-
     use io::prelude::*;
     use io::{copy, sink, empty, repeat};
 

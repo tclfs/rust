@@ -7,7 +7,13 @@ version = "0.0.0"
 name = "alloc_system"
 path = "lib.rs"
 test = false
+doc = false
 
 [dependencies]
+alloc = { path = "../liballoc" }
 core = { path = "../libcore" }
 libc = { path = "../rustc/libc_shim" }
+
+# See comments in the source for what this dependency is
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
+dlmalloc = { path = "../rustc/dlmalloc_shim" }

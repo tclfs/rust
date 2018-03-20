@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// pretty-expanded FIXME #23616
-
 #![allow(dead_code)]
 
 // Get<T> is covariant in T
@@ -33,7 +31,7 @@ fn get<'a, G>(get: &G) -> i32
     // This fails to type-check because, without variance, we can't
     // use `G : Get<&'a i32>` as evidence that `G : Get<&'b i32>`,
     // even if `'a : 'b`.
-    pick(get, &22) //~ ERROR cannot infer
+    pick(get, &22) //~ ERROR 34:5: 34:9: explicit lifetime required in the type of `get` [E0621]
 }
 
 fn pick<'b, G>(get: &'b G, if_odd: &'b i32) -> i32

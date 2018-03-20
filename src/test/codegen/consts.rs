@@ -9,6 +9,7 @@
 // except according to those terms.
 
 // compile-flags: -C no-prepopulate-passes
+// ignore-tidy-linelength
 
 #![crate_type = "lib"]
 
@@ -19,11 +20,11 @@
 // CHECK: @STATIC = {{.*}}, align 4
 
 // This checks the constants from inline_enum_const
-// CHECK: @const{{[0-9]+}} = {{.*}}, align 2
+// CHECK: @byte_str.{{[0-9]+}} = {{.*}}, align 2
 
 // This checks the constants from {low,high}_align_const, they share the same
 // constant, but the alignment differs, so the higher one should be used
-// CHECK: @const{{[0-9]+}} = {{.*}}, align 4
+// CHECK: [[LOW_HIGH:@byte_str.[0-9]+]] = {{.*}}, align 4
 
 #[derive(Copy, Clone)]
 
@@ -46,21 +47,21 @@ pub fn static_enum_const() -> E<i16, i32> {
 // CHECK-LABEL: @inline_enum_const
 #[no_mangle]
 pub fn inline_enum_const() -> E<i8, i16> {
-    E::A(0)
+    *&E::A(0)
 }
 
 // CHECK-LABEL: @low_align_const
 #[no_mangle]
 pub fn low_align_const() -> E<i16, [i16; 3]> {
 // Check that low_align_const and high_align_const use the same constant
-// CHECK: call void @llvm.memcpy.{{.*}}(i8* %{{[0-9]+}}, i8* {{.*}} [[LOW_HIGH:@const[0-9]+]]
-    E::A(0)
+// CHECK: i8* getelementptr inbounds (<{ [8 x i8] }>, <{ [8 x i8] }>* [[LOW_HIGH]], i32 0, i32 0, i32 0),
+    *&E::A(0)
 }
 
 // CHECK-LABEL: @high_align_const
 #[no_mangle]
 pub fn high_align_const() -> E<i16, i32> {
 // Check that low_align_const and high_align_const use the same constant
-// CHECK: call void @llvm.memcpy.{{.*}}(i8* %{{[0-9]}}, i8* {{.*}} [[LOW_HIGH]]
-    E::A(0)
+// CHECK: i8* getelementptr inbounds (<{ [8 x i8] }>, <{ [8 x i8] }>* [[LOW_HIGH]], i32 0, i32 0, i32 0),
+    *&E::A(0)
 }

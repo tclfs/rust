@@ -8,30 +8,81 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-const X: usize = 42 && 39; //~ ERROR: can't do this op on integrals
-const ARR: [i32; X] = [99; 34]; //~ NOTE: for array length here
+const X: usize = 42 && 39;
+//~^ ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected usize, found bool
+const ARR: [i32; X] = [99; 34];
+//~^ ERROR constant evaluation error
 
-const X1: usize = 42 || 39; //~ ERROR: can't do this op on integrals
-const ARR1: [i32; X1] = [99; 47]; //~ NOTE: for array length here
+const X1: usize = 42 || 39;
+//~^ ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected usize, found bool
+const ARR1: [i32; X1] = [99; 47];
+//~^ ERROR constant evaluation error
 
-const X2: usize = -42 || -39; //~ ERROR: unary negation of unsigned integer
-const ARR2: [i32; X2] = [99; 18446744073709551607]; //~ NOTE: for array length here
+const X2: usize = -42 || -39;
+//~^ ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected usize, found bool
+const ARR2: [i32; X2] = [99; 18446744073709551607];
+//~^ ERROR constant evaluation error
 
-const X3: usize = -42 && -39; //~ ERROR: unary negation of unsigned integer
-const ARR3: [i32; X3] = [99; 6]; //~ NOTE: for array length here
+const X3: usize = -42 && -39;
+//~^ ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected bool, found integral variable
+//~| ERROR mismatched types
+//~| expected usize, found bool
+const ARR3: [i32; X3] = [99; 6];
+//~^ ERROR constant evaluation error
 
 const Y: usize = 42.0 == 42.0;
-const ARRR: [i32; Y] = [99; 1]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR: [i32; Y] = [99; 1];
+//~^ ERROR constant evaluation error
+
 const Y1: usize = 42.0 >= 42.0;
-const ARRR1: [i32; Y] = [99; 1]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR1: [i32; Y1] = [99; 1];
+//~^ ERROR constant evaluation error
+
 const Y2: usize = 42.0 <= 42.0;
-const ARRR2: [i32; Y] = [99; 1]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR2: [i32; Y2] = [99; 1];
+//~^ ERROR constant evaluation error
+
 const Y3: usize = 42.0 > 42.0;
-const ARRR3: [i32; Y] = [99; 0]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR3: [i32; Y3] = [99; 0];
+//~^ ERROR constant evaluation error
+
 const Y4: usize = 42.0 < 42.0;
-const ARRR4: [i32; Y] = [99; 0]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR4: [i32; Y4] = [99; 0];
+//~^ ERROR constant evaluation error
+
 const Y5: usize = 42.0 != 42.0;
-const ARRR5: [i32; Y] = [99; 0]; //~ ERROR: expected usize value for array length
+//~^ ERROR mismatched types
+//~| expected usize, found bool
+const ARRR5: [i32; Y5] = [99; 0];
+//~^ ERROR constant evaluation error
 
 fn main() {
     let _ = ARR;

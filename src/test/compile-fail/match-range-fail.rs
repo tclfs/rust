@@ -15,19 +15,21 @@ fn main() {
     //~^^ ERROR only char and numeric types are allowed in range
     //~| start type: &'static str
     //~| end type: &'static str
+    //~| ERROR non-reference pattern used to match a reference
 
     match "wow" {
         10 ... "what" => ()
     };
     //~^^ ERROR only char and numeric types are allowed in range
-    //~| start type: _
+    //~| start type: {integer}
     //~| end type: &'static str
+    //~| ERROR non-reference pattern used to match a reference
 
     match 5 {
         'c' ... 100 => { }
         _ => { }
     };
-    //~^^^ ERROR mismatched types in range
-    //~| expected char
-    //~| found integral variable
+    //~^^^ ERROR mismatched types
+    //~| expected type `{integer}`
+    //~| found type `char`
 }

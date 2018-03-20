@@ -8,9 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-wasm32-bare compiled with panic=abort by default
 // aux-build:reachable-unnameable-items.rs
-
-#![feature(recover)]
 
 extern crate reachable_unnameable_items;
 use reachable_unnameable_items::*;
@@ -37,5 +36,5 @@ fn main() {
 
     let none = None;
     function_accepting_unnameable_type(none);
-    let _guard = std::panic::recover(|| none.unwrap().method_of_unnameable_type3());
+    let _guard = std::panic::catch_unwind(|| none.unwrap().method_of_unnameable_type3());
 }

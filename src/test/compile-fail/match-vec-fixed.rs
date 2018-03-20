@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(slice_patterns)]
+#![deny(unreachable_patterns)]
 
 fn a() {
     let v = [1, 2, 3];

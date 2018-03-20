@@ -9,7 +9,8 @@ path = "lib.rs"
 crate-type = ["dylib"]
 
 [dependencies]
-log = { path = "../liblog" }
 rustc = { path = "../librustc" }
-rustc_front = { path = "../librustc_front" }
+rustc_typeck = { path = "../librustc_typeck" }
 syntax = { path = "../libsyntax" }
+syntax_pos = { path = "../libsyntax_pos" }
+rustc_data_structures = { path = "../librustc_data_structures" }

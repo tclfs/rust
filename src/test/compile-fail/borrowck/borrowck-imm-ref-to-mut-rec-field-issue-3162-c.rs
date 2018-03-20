@@ -8,11 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// revisions: ast mir
+//[mir]compile-flags: -Z borrowck=mir
+
 fn main() {
     let mut _a = 3;
     let _b = &mut _a;
     {
         let _c = &*_b;
-        _a = 4; //~ ERROR cannot assign to `_a`
+        _a = 4; //[ast]~ ERROR cannot assign to `_a`
+                //[mir]~^ ERROR cannot assign to `_a` because it is borrowed
     }
 }

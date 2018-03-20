@@ -15,20 +15,49 @@
 //! in the first place). See README.md for a general overview of how
 //! to use this class.
 
+use fx::{FxHashMap, FxHashSet};
+
+use std::cell::Cell;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
-use std::mem;
+use std::hash;
+use std::marker::PhantomData;
 
 mod node_index;
 use self::node_index::NodeIndex;
 
-mod tree_index;
-use self::tree_index::TreeIndex;
-
-
 #[cfg(test)]
 mod test;
 
-pub struct ObligationForest<O, T> {
+pub trait ForestObligation : Clone + Debug {
+    type Predicate : Clone + hash::Hash + Eq + Debug;
+
+    fn as_predicate(&self) -> &Self::Predicate;
+}
+
+pub trait ObligationProcessor {
+    type Obligation : ForestObligation;
+    type Error : Debug;
+
+    fn process_obligation(&mut self,
+                          obligation: &mut Self::Obligation)
+                          -> Result<Option<Vec<Self::Obligation>>, Self::Error>;
+
+    /// As we do the cycle check, we invoke this callback when we
+    /// encounter an actual cycle. `cycle` is an iterator that starts
+    /// at the start of the cycle in the stack and walks **toward the
+    /// top**.
+    ///
+    /// In other words, if we had O1 which required O2 which required
+    /// O3 which required O1, we would give an iterator yielding O1,
+    /// O2, O3 (O1 is not yielded twice).
+    fn process_backedge<'c, I>(&mut self,
+                               cycle: I,
+                               _marker: PhantomData<&'c Self::Obligation>)
+        where I: Clone + Iterator<Item=&'c Self::Obligation>;
+}
+
+pub struct ObligationForest<O: ForestObligation> {
     /// The list of obligations. In between calls to
     /// `process_obligations`, this list only contains nodes in the
     /// `Pending` or `Success` state (with a non-zero number of
@@ -42,51 +71,61 @@ pub struct ObligationForest<O, T> {
     /// at a higher index than its parent. This is needed by the
     /// backtrace iterator (which uses `split_at`).
     nodes: Vec<Node<O>>,
-    trees: Vec<Tree<T>>,
-    snapshots: Vec<usize>,
+    /// A cache of predicates that have been successfully completed.
+    done_cache: FxHashSet<O::Predicate>,
+    /// An cache of the nodes in `nodes`, indexed by predicate.
+    waiting_cache: FxHashMap<O::Predicate, NodeIndex>,
+    /// A list of the obligations added in snapshots, to allow
+    /// for their removal.
+    cache_list: Vec<O::Predicate>,
+    scratch: Option<Vec<usize>>,
 }
 
-pub struct Snapshot {
-    len: usize,
-}
-
-struct Tree<T> {
-    root: NodeIndex,
-    state: T,
-}
-
+#[derive(Debug)]
 struct Node<O> {
-    state: NodeState<O>,
+    obligation: O,
+    state: Cell<NodeState>,
+
+    /// Obligations that depend on this obligation for their
+    /// completion. They must all be in a non-pending state.
+    dependents: Vec<NodeIndex>,
+    /// The parent of a node - the original obligation of
+    /// which it is a subobligation. Except for error reporting,
+    /// this is just another member of `dependents`.
     parent: Option<NodeIndex>,
-    tree: TreeIndex,
 }
 
 /// The state of one node in some tree within the forest. This
 /// represents the current state of processing for the obligation (of
 /// type `O`) associated with this node.
-#[derive(Debug)]
-enum NodeState<O> {
-    /// Obligation not yet resolved to success or error.
-    Pending {
-        obligation: O,
-    },
+///
+/// Outside of ObligationForest methods, nodes should be either Pending
+/// or Waiting.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum NodeState {
+    /// Obligations for which selection had not yet returned a
+    /// non-ambiguous result.
+    Pending,
 
-    /// Obligation resolved to success; `num_incomplete_children`
-    /// indicates the number of children still in an "incomplete"
-    /// state. Incomplete means that either the child is still
-    /// pending, or it has children which are incomplete. (Basically,
-    /// there is pending work somewhere in the subtree of the child.)
-    ///
-    /// Once all children have completed, success nodes are removed
-    /// from the vector by the compression step.
-    Success {
-        obligation: O,
-        num_incomplete_children: usize,
-    },
+    /// This obligation was selected successfully, but may or
+    /// may not have subobligations.
+    Success,
+
+    /// This obligation was selected successfully, but it has
+    /// a pending subobligation.
+    Waiting,
+
+    /// This obligation, along with its subobligations, are complete,
+    /// and will be removed in the next collection.
+    Done,
 
     /// This obligation was resolved to an error. Error nodes are
     /// removed from the vector by the compression step.
     Error,
+
+    /// This is a temporary state used in DFS loops to detect cycles,
+    /// it should not exist outside of these DFSes.
+    OnDfsStack,
 }
 
 #[derive(Debug)]
@@ -113,12 +152,14 @@ pub struct Error<O, E> {
     pub backtrace: Vec<O>,
 }
 
-impl<O: Debug, T: Debug> ObligationForest<O, T> {
-    pub fn new() -> ObligationForest<O, T> {
+impl<O: ForestObligation> ObligationForest<O> {
+    pub fn new() -> ObligationForest<O> {
         ObligationForest {
-            trees: vec![],
             nodes: vec![],
-            snapshots: vec![],
+            done_cache: FxHashSet(),
+            waiting_cache: FxHashMap(),
+            cache_list: vec![],
+            scratch: Some(vec![]),
         }
     }
 
@@ -128,74 +169,62 @@ impl<O: Debug, T: Debug> ObligationForest<O, T> {
         self.nodes.len()
     }
 
-    pub fn start_snapshot(&mut self) -> Snapshot {
-        self.snapshots.push(self.trees.len());
-        Snapshot { len: self.snapshots.len() }
+    /// Registers an obligation
+    ///
+    /// This CAN be done in a snapshot
+    pub fn register_obligation(&mut self, obligation: O) {
+        // Ignore errors here - there is no guarantee of success.
+        let _ = self.register_obligation_at(obligation, None);
     }
 
-    pub fn commit_snapshot(&mut self, snapshot: Snapshot) {
-        assert_eq!(snapshot.len, self.snapshots.len());
-        let trees_len = self.snapshots.pop().unwrap();
-        assert!(self.trees.len() >= trees_len);
-    }
-
-    pub fn rollback_snapshot(&mut self, snapshot: Snapshot) {
-        // Check that we are obeying stack discipline.
-        assert_eq!(snapshot.len, self.snapshots.len());
-        let trees_len = self.snapshots.pop().unwrap();
-
-        // If nothing happened in snapshot, done.
-        if self.trees.len() == trees_len {
-            return;
+    // returns Err(()) if we already know this obligation failed.
+    fn register_obligation_at(&mut self, obligation: O, parent: Option<NodeIndex>)
+                              -> Result<(), ()>
+    {
+        if self.done_cache.contains(obligation.as_predicate()) {
+            return Ok(())
         }
 
-        // Find root of first tree; because nothing can happen in a
-        // snapshot but pushing trees, all nodes after that should be
-        // roots of other trees as well
-        let first_root_index = self.trees[trees_len].root.get();
-        debug_assert!(self.nodes[first_root_index..]
-                          .iter()
-                          .zip(first_root_index..)
-                          .all(|(root, root_index)| {
-                              self.trees[root.tree.get()].root.get() == root_index
-                          }));
-
-        // Pop off tree/root pairs pushed during snapshot.
-        self.trees.truncate(trees_len);
-        self.nodes.truncate(first_root_index);
-    }
-
-    pub fn in_snapshot(&self) -> bool {
-        !self.snapshots.is_empty()
-    }
-
-    /// Adds a new tree to the forest.
-    ///
-    /// This CAN be done during a snapshot.
-    pub fn push_tree(&mut self, obligation: O, tree_state: T) {
-        let index = NodeIndex::new(self.nodes.len());
-        let tree = TreeIndex::new(self.trees.len());
-        self.trees.push(Tree {
-            root: index,
-            state: tree_state,
-        });
-        self.nodes.push(Node::new(tree, None, obligation));
+        match self.waiting_cache.entry(obligation.as_predicate().clone()) {
+            Entry::Occupied(o) => {
+                debug!("register_obligation_at({:?}, {:?}) - duplicate of {:?}!",
+                       obligation, parent, o.get());
+                if let Some(parent) = parent {
+                    if self.nodes[o.get().get()].dependents.contains(&parent) {
+                        debug!("register_obligation_at({:?}, {:?}) - duplicate subobligation",
+                               obligation, parent);
+                    } else {
+                        self.nodes[o.get().get()].dependents.push(parent);
+                    }
+                }
+                if let NodeState::Error = self.nodes[o.get().get()].state.get() {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
+            Entry::Vacant(v) => {
+                debug!("register_obligation_at({:?}, {:?}) - ok, new index is {}",
+                       obligation, parent, self.nodes.len());
+                v.insert(NodeIndex::new(self.nodes.len()));
+                self.cache_list.push(obligation.as_predicate().clone());
+                self.nodes.push(Node::new(parent, obligation));
+                Ok(())
+            }
+        }
     }
 
     /// Convert all remaining obligations to the given error.
     ///
     /// This cannot be done during a snapshot.
     pub fn to_errors<E: Clone>(&mut self, error: E) -> Vec<Error<O, E>> {
-        assert!(!self.in_snapshot());
         let mut errors = vec![];
         for index in 0..self.nodes.len() {
-            debug_assert!(!self.nodes[index].is_popped());
-            self.inherit_error(index);
-            if let NodeState::Pending { .. } = self.nodes[index].state {
-                let backtrace = self.backtrace(index);
+            if let NodeState::Pending = self.nodes[index].state.get() {
+                let backtrace = self.error_at(index);
                 errors.push(Error {
                     error: error.clone(),
-                    backtrace: backtrace,
+                    backtrace,
                 });
             }
         }
@@ -210,56 +239,35 @@ impl<O: Debug, T: Debug> ObligationForest<O, T> {
     {
         self.nodes
             .iter()
-            .filter_map(|n| {
-                match n.state {
-                    NodeState::Pending { ref obligation } => Some(obligation),
-                    _ => None,
-                }
-            })
-            .cloned()
+            .filter(|n| n.state.get() == NodeState::Pending)
+            .map(|n| n.obligation.clone())
             .collect()
     }
 
-    /// Process the obligations.
+    /// Perform a pass through the obligation list. This must
+    /// be called in a loop until `outcome.stalled` is false.
     ///
     /// This CANNOT be unrolled (presently, at least).
-    pub fn process_obligations<E, F>(&mut self, mut action: F) -> Outcome<O, E>
-        where E: Debug,
-              F: FnMut(&mut O, &mut T, Backtrace<O>) -> Result<Option<Vec<O>>, E>
+    pub fn process_obligations<P>(&mut self, processor: &mut P) -> Outcome<O, P::Error>
+        where P: ObligationProcessor<Obligation=O>
     {
         debug!("process_obligations(len={})", self.nodes.len());
-        assert!(!self.in_snapshot()); // cannot unroll this action
 
         let mut errors = vec![];
         let mut stalled = true;
 
-        // We maintain the invariant that the list is in pre-order, so
-        // parents occur before their children. Also, whenever an
-        // error occurs, we propagate it from the child all the way to
-        // the root of the tree. Together, these two facts mean that
-        // when we visit a node, we can check if its root is in error,
-        // and we will find out if any prior node within this forest
-        // encountered an error.
-
         for index in 0..self.nodes.len() {
-            debug_assert!(!self.nodes[index].is_popped());
-            self.inherit_error(index);
-
             debug!("process_obligations: node {} == {:?}",
                    index,
-                   self.nodes[index].state);
+                   self.nodes[index]);
 
-            let result = {
-                let Node { tree, parent, .. } = self.nodes[index];
-                let (prefix, suffix) = self.nodes.split_at_mut(index);
-                let backtrace = Backtrace::new(prefix, parent);
-                match suffix[0].state {
-                    NodeState::Error |
-                    NodeState::Success { .. } => continue,
-                    NodeState::Pending { ref mut obligation } => {
-                        action(obligation, &mut self.trees[tree.get()].state, backtrace)
-                    }
+            let result = match self.nodes[index] {
+                Node { state: ref _state, ref mut obligation, .. }
+                    if _state.get() == NodeState::Pending =>
+                {
+                    processor.process_obligation(obligation)
                 }
+                _ => continue
             };
 
             debug!("process_obligations: node {} got result {:?}",
@@ -273,271 +281,330 @@ impl<O: Debug, T: Debug> ObligationForest<O, T> {
                 Ok(Some(children)) => {
                     // if we saw a Some(_) result, we are not (yet) stalled
                     stalled = false;
-                    self.success(index, children);
+                    self.nodes[index].state.set(NodeState::Success);
+
+                    for child in children {
+                        let st = self.register_obligation_at(
+                            child,
+                            Some(NodeIndex::new(index))
+                        );
+                        if let Err(()) = st {
+                            // error already reported - propagate it
+                            // to our node.
+                            self.error_at(index);
+                        }
+                    }
                 }
                 Err(err) => {
-                    let backtrace = self.backtrace(index);
+                    stalled = false;
+                    let backtrace = self.error_at(index);
                     errors.push(Error {
                         error: err,
-                        backtrace: backtrace,
+                        backtrace,
                     });
                 }
             }
         }
 
+        if stalled {
+            // There's no need to perform marking, cycle processing and compression when nothing
+            // changed.
+            return Outcome {
+                completed: vec![],
+                errors,
+                stalled,
+            };
+        }
+
+        self.mark_as_waiting();
+        self.process_cycles(processor);
+
         // Now we have to compress the result
-        let successful_obligations = self.compress();
+        let completed_obligations = self.compress();
 
         debug!("process_obligations: complete");
 
         Outcome {
-            completed: successful_obligations,
-            errors: errors,
-            stalled: stalled,
+            completed: completed_obligations,
+            errors,
+            stalled,
         }
     }
 
-    /// Indicates that node `index` has been processed successfully,
-    /// yielding `children` as the derivative work. If children is an
-    /// empty vector, this will update the ref count on the parent of
-    /// `index` to indicate that a child has completed
-    /// successfully. Otherwise, adds new nodes to represent the child
-    /// work.
-    fn success(&mut self, index: usize, children: Vec<O>) {
-        debug!("success(index={}, children={:?})", index, children);
+    /// Mark all NodeState::Success nodes as NodeState::Done and
+    /// report all cycles between them. This should be called
+    /// after `mark_as_waiting` marks all nodes with pending
+    /// subobligations as NodeState::Waiting.
+    fn process_cycles<P>(&mut self, processor: &mut P)
+        where P: ObligationProcessor<Obligation=O>
+    {
+        let mut stack = self.scratch.take().unwrap();
+        debug_assert!(stack.is_empty());
 
-        let num_incomplete_children = children.len();
+        debug!("process_cycles()");
 
-        if num_incomplete_children == 0 {
-            // if there is no work left to be done, decrement parent's ref count
-            self.update_parent(index);
-        } else {
-            // create child work
-            let tree_index = self.nodes[index].tree;
-            let node_index = NodeIndex::new(index);
-            self.nodes.extend(children.into_iter()
-                                      .map(|o| Node::new(tree_index, Some(node_index), o)));
+        for index in 0..self.nodes.len() {
+            // For rustc-benchmarks/inflate-0.1.0 this state test is extremely
+            // hot and the state is almost always `Pending` or `Waiting`. It's
+            // a win to handle the no-op cases immediately to avoid the cost of
+            // the function call.
+            let state = self.nodes[index].state.get();
+            match state {
+                NodeState::Waiting | NodeState::Pending | NodeState::Done | NodeState::Error => {},
+                _ => self.find_cycles_from_node(&mut stack, processor, index),
+            }
         }
 
-        // change state from `Pending` to `Success`, temporarily swapping in `Error`
-        let state = mem::replace(&mut self.nodes[index].state, NodeState::Error);
-        self.nodes[index].state = match state {
-            NodeState::Pending { obligation } => {
-                NodeState::Success {
-                    obligation: obligation,
-                    num_incomplete_children: num_incomplete_children,
-                }
+        debug!("process_cycles: complete");
+
+        debug_assert!(stack.is_empty());
+        self.scratch = Some(stack);
+    }
+
+    fn find_cycles_from_node<P>(&self, stack: &mut Vec<usize>,
+                                processor: &mut P, index: usize)
+        where P: ObligationProcessor<Obligation=O>
+    {
+        let node = &self.nodes[index];
+        let state = node.state.get();
+        match state {
+            NodeState::OnDfsStack => {
+                let index =
+                    stack.iter().rposition(|n| *n == index).unwrap();
+                processor.process_backedge(stack[index..].iter().map(GetObligation(&self.nodes)),
+                                           PhantomData);
             }
-            NodeState::Success { .. } |
-            NodeState::Error => unreachable!(),
+            NodeState::Success => {
+                node.state.set(NodeState::OnDfsStack);
+                stack.push(index);
+                if let Some(parent) = node.parent {
+                    self.find_cycles_from_node(stack, processor, parent.get());
+                }
+                for dependent in &node.dependents {
+                    self.find_cycles_from_node(stack, processor, dependent.get());
+                }
+                stack.pop();
+                node.state.set(NodeState::Done);
+            },
+            NodeState::Waiting | NodeState::Pending => {
+                // this node is still reachable from some pending node. We
+                // will get to it when they are all processed.
+            }
+            NodeState::Done | NodeState::Error => {
+                // already processed that node
+            }
         };
-    }
-
-    /// Decrements the ref count on the parent of `child`; if the
-    /// parent's ref count then reaches zero, proceeds recursively.
-    fn update_parent(&mut self, child: usize) {
-        debug!("update_parent(child={})", child);
-        if let Some(parent) = self.nodes[child].parent {
-            let parent = parent.get();
-            match self.nodes[parent].state {
-                NodeState::Success { ref mut num_incomplete_children, .. } => {
-                    *num_incomplete_children -= 1;
-                    if *num_incomplete_children > 0 {
-                        return;
-                    }
-                }
-                _ => unreachable!(),
-            }
-            self.update_parent(parent);
-        }
-    }
-
-    /// If the root of `child` is in an error state, places `child`
-    /// into an error state. This is used during processing so that we
-    /// skip the remaining obligations from a tree once some other
-    /// node in the tree is found to be in error.
-    fn inherit_error(&mut self, child: usize) {
-        let tree = self.nodes[child].tree;
-        let root = self.trees[tree.get()].root;
-        if let NodeState::Error = self.nodes[root.get()].state {
-            self.nodes[child].state = NodeState::Error;
-        }
     }
 
     /// Returns a vector of obligations for `p` and all of its
     /// ancestors, putting them into the error state in the process.
-    /// The fact that the root is now marked as an error is used by
-    /// `inherit_error` above to propagate the error state to the
-    /// remainder of the tree.
-    fn backtrace(&mut self, mut p: usize) -> Vec<O> {
+    fn error_at(&mut self, p: usize) -> Vec<O> {
+        let mut error_stack = self.scratch.take().unwrap();
         let mut trace = vec![];
+
+        let mut n = p;
         loop {
-            let state = mem::replace(&mut self.nodes[p].state, NodeState::Error);
-            match state {
-                NodeState::Pending { obligation } |
-                NodeState::Success { obligation, .. } => {
-                    trace.push(obligation);
-                }
-                NodeState::Error => {
-                    // we should not encounter an error, because if
-                    // there was an error in the ancestors, it should
-                    // have been propagated down and we should never
-                    // have tried to process this obligation
-                    panic!("encountered error in node {:?} when collecting stack trace",
-                           p);
-                }
-            }
+            self.nodes[n].state.set(NodeState::Error);
+            trace.push(self.nodes[n].obligation.clone());
+            error_stack.extend(self.nodes[n].dependents.iter().map(|x| x.get()));
 
             // loop to the parent
-            match self.nodes[p].parent {
-                Some(q) => {
-                    p = q.get();
-                }
-                None => {
-                    return trace;
-                }
+            match self.nodes[n].parent {
+                Some(q) => n = q.get(),
+                None => break
             }
         }
+
+        while let Some(i) = error_stack.pop() {
+            let node = &self.nodes[i];
+
+            match node.state.get() {
+                NodeState::Error => continue,
+                _ => node.state.set(NodeState::Error)
+            }
+
+            error_stack.extend(
+                node.dependents.iter().cloned().chain(node.parent).map(|x| x.get())
+            );
+        }
+
+        self.scratch = Some(error_stack);
+        trace
+    }
+
+    #[inline]
+    fn mark_neighbors_as_waiting_from(&self, node: &Node<O>) {
+        if let Some(parent) = node.parent {
+            self.mark_as_waiting_from(&self.nodes[parent.get()]);
+        }
+
+        for dependent in &node.dependents {
+            self.mark_as_waiting_from(&self.nodes[dependent.get()]);
+        }
+    }
+
+    /// Marks all nodes that depend on a pending node as NodeState::Waiting.
+    fn mark_as_waiting(&self) {
+        for node in &self.nodes {
+            if node.state.get() == NodeState::Waiting {
+                node.state.set(NodeState::Success);
+            }
+        }
+
+        for node in &self.nodes {
+            if node.state.get() == NodeState::Pending {
+                self.mark_neighbors_as_waiting_from(node);
+            }
+        }
+    }
+
+    fn mark_as_waiting_from(&self, node: &Node<O>) {
+        match node.state.get() {
+            NodeState::Waiting | NodeState::Error | NodeState::OnDfsStack => return,
+            NodeState::Success => node.state.set(NodeState::Waiting),
+            NodeState::Pending | NodeState::Done => {},
+        }
+
+        self.mark_neighbors_as_waiting_from(node);
     }
 
     /// Compresses the vector, removing all popped nodes. This adjusts
     /// the indices and hence invalidates any outstanding
     /// indices. Cannot be used during a transaction.
+    ///
+    /// Beforehand, all nodes must be marked as `Done` and no cycles
+    /// on these nodes may be present. This is done by e.g. `process_cycles`.
+    #[inline(never)]
     fn compress(&mut self) -> Vec<O> {
-        assert!(!self.in_snapshot()); // didn't write code to unroll this action
-        let mut node_rewrites: Vec<_> = (0..self.nodes.len()).collect();
-        let mut tree_rewrites: Vec<_> = (0..self.trees.len()).collect();
-
-        // Finish propagating error state. Note that in this case we
-        // only have to check immediate parents, rather than all
-        // ancestors, because all errors have already occurred that
-        // are going to occur.
         let nodes_len = self.nodes.len();
-        for i in 0..nodes_len {
-            if !self.nodes[i].is_popped() {
-                self.inherit_error(i);
-            }
-        }
-
-        // Determine which trees to remove by checking if their root
-        // is popped.
-        let mut dead_trees = 0;
-        let trees_len = self.trees.len();
-        for i in 0..trees_len {
-            let root_node = self.trees[i].root;
-            if self.nodes[root_node.get()].is_popped() {
-                dead_trees += 1;
-            } else if dead_trees > 0 {
-                self.trees.swap(i, i - dead_trees);
-                tree_rewrites[i] -= dead_trees;
-            }
-        }
-
-        // Now go through and move all nodes that are either
-        // successful or which have an error over into to the end of
-        // the list, preserving the relative order of the survivors
-        // (which is important for the `inherit_error` logic).
+        let mut node_rewrites: Vec<_> = self.scratch.take().unwrap();
+        node_rewrites.extend(0..nodes_len);
         let mut dead_nodes = 0;
-        for i in 0..nodes_len {
-            if self.nodes[i].is_popped() {
-                dead_nodes += 1;
-            } else if dead_nodes > 0 {
-                self.nodes.swap(i, i - dead_nodes);
-                node_rewrites[i] -= dead_nodes;
+
+        // Now move all popped nodes to the end. Try to keep the order.
+        //
+        // LOOP INVARIANT:
+        //     self.nodes[0..i - dead_nodes] are the first remaining nodes
+        //     self.nodes[i - dead_nodes..i] are all dead
+        //     self.nodes[i..] are unchanged
+        for i in 0..self.nodes.len() {
+            match self.nodes[i].state.get() {
+                NodeState::Pending | NodeState::Waiting => {
+                    if dead_nodes > 0 {
+                        self.nodes.swap(i, i - dead_nodes);
+                        node_rewrites[i] -= dead_nodes;
+                    }
+                }
+                NodeState::Done => {
+                    self.waiting_cache.remove(self.nodes[i].obligation.as_predicate());
+                    // FIXME(HashMap): why can't I get my key back?
+                    self.done_cache.insert(self.nodes[i].obligation.as_predicate().clone());
+                    node_rewrites[i] = nodes_len;
+                    dead_nodes += 1;
+                }
+                NodeState::Error => {
+                    // We *intentionally* remove the node from the cache at this point. Otherwise
+                    // tests must come up with a different type on every type error they
+                    // check against.
+                    self.waiting_cache.remove(self.nodes[i].obligation.as_predicate());
+                    node_rewrites[i] = nodes_len;
+                    dead_nodes += 1;
+                }
+                NodeState::OnDfsStack | NodeState::Success => unreachable!()
             }
         }
 
         // No compression needed.
-        if dead_nodes == 0 && dead_trees == 0 {
+        if dead_nodes == 0 {
+            node_rewrites.truncate(0);
+            self.scratch = Some(node_rewrites);
             return vec![];
         }
-
-        // Pop off the trees we killed.
-        self.trees.truncate(trees_len - dead_trees);
 
         // Pop off all the nodes we killed and extract the success
         // stories.
         let successful = (0..dead_nodes)
                              .map(|_| self.nodes.pop().unwrap())
                              .flat_map(|node| {
-                                 match node.state {
+                                 match node.state.get() {
                                      NodeState::Error => None,
-                                     NodeState::Pending { .. } => unreachable!(),
-                                     NodeState::Success { obligation, num_incomplete_children } => {
-                                         assert_eq!(num_incomplete_children, 0);
-                                         Some(obligation)
-                                     }
+                                     NodeState::Done => Some(node.obligation),
+                                     _ => unreachable!()
                                  }
                              })
-                             .collect();
+            .collect();
+        self.apply_rewrites(&node_rewrites);
 
-        // Adjust the various indices, since we compressed things.
-        for tree in &mut self.trees {
-            tree.root = NodeIndex::new(node_rewrites[tree.root.get()]);
-        }
-        for node in &mut self.nodes {
-            if let Some(ref mut index) = node.parent {
-                let new_index = node_rewrites[index.get()];
-                debug_assert!(new_index < (nodes_len - dead_nodes));
-                *index = NodeIndex::new(new_index);
-            }
-
-            node.tree = TreeIndex::new(tree_rewrites[node.tree.get()]);
-        }
+        node_rewrites.truncate(0);
+        self.scratch = Some(node_rewrites);
 
         successful
+    }
+
+    fn apply_rewrites(&mut self, node_rewrites: &[usize]) {
+        let nodes_len = node_rewrites.len();
+
+        for node in &mut self.nodes {
+            if let Some(index) = node.parent {
+                let new_index = node_rewrites[index.get()];
+                if new_index >= nodes_len {
+                    // parent dead due to error
+                    node.parent = None;
+                } else {
+                    node.parent = Some(NodeIndex::new(new_index));
+                }
+            }
+
+            let mut i = 0;
+            while i < node.dependents.len() {
+                let new_index = node_rewrites[node.dependents[i].get()];
+                if new_index >= nodes_len {
+                    node.dependents.swap_remove(i);
+                } else {
+                    node.dependents[i] = NodeIndex::new(new_index);
+                    i += 1;
+                }
+            }
+        }
+
+        let mut kill_list = vec![];
+        for (predicate, index) in self.waiting_cache.iter_mut() {
+            let new_index = node_rewrites[index.get()];
+            if new_index >= nodes_len {
+                kill_list.push(predicate.clone());
+            } else {
+                *index = NodeIndex::new(new_index);
+            }
+        }
+
+        for predicate in kill_list { self.waiting_cache.remove(&predicate); }
     }
 }
 
 impl<O> Node<O> {
-    fn new(tree: TreeIndex, parent: Option<NodeIndex>, obligation: O) -> Node<O> {
+    fn new(parent: Option<NodeIndex>, obligation: O) -> Node<O> {
         Node {
-            parent: parent,
-            state: NodeState::Pending { obligation: obligation },
-            tree: tree,
-        }
-    }
-
-    fn is_popped(&self) -> bool {
-        match self.state {
-            NodeState::Pending { .. } => false,
-            NodeState::Success { num_incomplete_children, .. } => num_incomplete_children == 0,
-            NodeState::Error => true,
+            obligation,
+            parent,
+            state: Cell::new(NodeState::Pending),
+            dependents: vec![],
         }
     }
 }
 
+// I need a Clone closure
 #[derive(Clone)]
-pub struct Backtrace<'b, O: 'b> {
-    nodes: &'b [Node<O>],
-    pointer: Option<NodeIndex>,
-}
+struct GetObligation<'a, O: 'a>(&'a [Node<O>]);
 
-impl<'b, O> Backtrace<'b, O> {
-    fn new(nodes: &'b [Node<O>], pointer: Option<NodeIndex>) -> Backtrace<'b, O> {
-        Backtrace {
-            nodes: nodes,
-            pointer: pointer,
-        }
+impl<'a, 'b, O> FnOnce<(&'b usize,)> for GetObligation<'a, O> {
+    type Output = &'a O;
+    extern "rust-call" fn call_once(self, args: (&'b usize,)) -> &'a O {
+        &self.0[*args.0].obligation
     }
 }
 
-impl<'b, O> Iterator for Backtrace<'b, O> {
-    type Item = &'b O;
-
-    fn next(&mut self) -> Option<&'b O> {
-        debug!("Backtrace: self.pointer = {:?}", self.pointer);
-        if let Some(p) = self.pointer {
-            self.pointer = self.nodes[p.get()].parent;
-            match self.nodes[p.get()].state {
-                NodeState::Pending { ref obligation } |
-                NodeState::Success { ref obligation, .. } => Some(obligation),
-                NodeState::Error => {
-                    panic!("Backtrace encountered an error.");
-                }
-            }
-        } else {
-            None
-        }
+impl<'a, 'b, O> FnMut<(&'b usize,)> for GetObligation<'a, O> {
+    extern "rust-call" fn call_mut(&mut self, args: (&'b usize,)) -> &'a O {
+        &self.0[*args.0].obligation
     }
 }

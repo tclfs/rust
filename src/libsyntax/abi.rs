@@ -10,93 +10,68 @@
 
 use std::fmt;
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[allow(non_camel_case_types)]
-pub enum Os {
-    Windows,
-    Macos,
-    Linux,
-    Android,
-    Freebsd,
-    iOS,
-    Dragonfly,
-    Bitrig,
-    Netbsd,
-    Openbsd,
-    NaCl,
-    Solaris,
-}
-
 #[derive(PartialEq, Eq, Hash, RustcEncodable, RustcDecodable, Clone, Copy, Debug)]
 pub enum Abi {
     // NB: This ordering MUST match the AbiDatas array below.
     // (This is ensured by the test indices_are_correct().)
 
-    // Single platform ABIs come first (`for_arch()` relies on this)
+    // Single platform ABIs
     Cdecl,
     Stdcall,
     Fastcall,
     Vectorcall,
+    Thiscall,
     Aapcs,
     Win64,
+    SysV64,
+    PtxKernel,
+    Msp430Interrupt,
+    X86Interrupt,
 
-    // Multiplatform ABIs second
+    // Multiplatform / generic ABIs
     Rust,
     C,
     System,
     RustIntrinsic,
     RustCall,
     PlatformIntrinsic,
-}
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum Architecture {
-    X86,
-    X86_64,
-    Arm,
-    Mips,
-    Mipsel
+    Unadjusted
 }
 
 #[derive(Copy, Clone)]
 pub struct AbiData {
     abi: Abi,
 
-    // Name of this ABI as we like it called.
+    /// Name of this ABI as we like it called.
     name: &'static str,
-}
 
-#[derive(Copy, Clone)]
-pub enum AbiArchitecture {
-    /// Not a real ABI (e.g., intrinsic)
-    Rust,
-    /// An ABI that specifies cross-platform defaults (e.g., "C")
-    All,
-    /// Multiple architectures (bitset)
-    Archs(u32)
+    /// A generic ABI is supported on all platforms.
+    generic: bool,
 }
 
 #[allow(non_upper_case_globals)]
 const AbiDatas: &'static [AbiData] = &[
     // Platform-specific ABIs
-    AbiData {abi: Abi::Cdecl, name: "cdecl" },
-    AbiData {abi: Abi::Stdcall, name: "stdcall" },
-    AbiData {abi: Abi::Fastcall, name: "fastcall" },
-    AbiData {abi: Abi::Vectorcall, name: "vectorcall"},
-    AbiData {abi: Abi::Aapcs, name: "aapcs" },
-    AbiData {abi: Abi::Win64, name: "win64" },
+    AbiData {abi: Abi::Cdecl, name: "cdecl", generic: false },
+    AbiData {abi: Abi::Stdcall, name: "stdcall", generic: false },
+    AbiData {abi: Abi::Fastcall, name: "fastcall", generic: false },
+    AbiData {abi: Abi::Vectorcall, name: "vectorcall", generic: false},
+    AbiData {abi: Abi::Thiscall, name: "thiscall", generic: false},
+    AbiData {abi: Abi::Aapcs, name: "aapcs", generic: false },
+    AbiData {abi: Abi::Win64, name: "win64", generic: false },
+    AbiData {abi: Abi::SysV64, name: "sysv64", generic: false },
+    AbiData {abi: Abi::PtxKernel, name: "ptx-kernel", generic: false },
+    AbiData {abi: Abi::Msp430Interrupt, name: "msp430-interrupt", generic: false },
+    AbiData {abi: Abi::X86Interrupt, name: "x86-interrupt", generic: false },
 
     // Cross-platform ABIs
-    //
-    // NB: Do not adjust this ordering without
-    // adjusting the indices below.
-    AbiData {abi: Abi::Rust, name: "Rust" },
-    AbiData {abi: Abi::C, name: "C" },
-    AbiData {abi: Abi::System, name: "system" },
-    AbiData {abi: Abi::RustIntrinsic, name: "rust-intrinsic" },
-    AbiData {abi: Abi::RustCall, name: "rust-call" },
-    AbiData {abi: Abi::PlatformIntrinsic, name: "platform-intrinsic" }
+    AbiData {abi: Abi::Rust, name: "Rust", generic: true },
+    AbiData {abi: Abi::C, name: "C", generic: true },
+    AbiData {abi: Abi::System, name: "system", generic: true },
+    AbiData {abi: Abi::RustIntrinsic, name: "rust-intrinsic", generic: true },
+    AbiData {abi: Abi::RustCall, name: "rust-call", generic: true },
+    AbiData {abi: Abi::PlatformIntrinsic, name: "platform-intrinsic", generic: true },
+    AbiData {abi: Abi::Unadjusted, name: "unadjusted", generic: true },
 ];
 
 /// Returns the ABI with the given name (if any).
@@ -122,30 +97,15 @@ impl Abi {
     pub fn name(&self) -> &'static str {
         self.data().name
     }
+
+    pub fn generic(&self) -> bool {
+        self.data().generic
+    }
 }
 
 impl fmt::Display for Abi {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "\"{}\"", self.name())
-    }
-}
-
-impl fmt::Display for Os {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Os::Linux => "linux".fmt(f),
-            Os::Windows => "windows".fmt(f),
-            Os::Macos => "macos".fmt(f),
-            Os::iOS => "ios".fmt(f),
-            Os::Android => "android".fmt(f),
-            Os::Freebsd => "freebsd".fmt(f),
-            Os::Dragonfly => "dragonfly".fmt(f),
-            Os::Bitrig => "bitrig".fmt(f),
-            Os::Netbsd => "netbsd".fmt(f),
-            Os::Openbsd => "openbsd".fmt(f),
-            Os::NaCl => "nacl".fmt(f),
-            Os::Solaris => "solaris".fmt(f),
-        }
     }
 }
 

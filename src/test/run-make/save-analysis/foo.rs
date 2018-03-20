@@ -11,14 +11,14 @@
 #![ crate_name = "test" ]
 #![feature(box_syntax)]
 #![feature(rustc_private)]
-
+#![feature(associated_type_defaults)]
+#![feature(external_doc)]
 
 extern crate graphviz;
 // A simple rust project
 
 extern crate krate2;
 extern crate krate2 as krate3;
-extern crate flate as myflate;
 
 use graphviz::RenderOption;
 use std::collections::{HashMap,HashSet};
@@ -52,10 +52,15 @@ fn test_alias<I: Iterator>(i: Option<<I as Iterator>::Item>) {
 
     krate2::hello();
     krate3::hello();
-    myflate::deflate_bytes(&[]);
 
     let x = (3isize, 4usize);
     let y = x.1;
+}
+
+// Issue #37700
+const LUT_BITS: usize = 3;
+pub struct HuffmanTable {
+    ac_lut: Option<[(i16, u8); 1 << LUT_BITS]>,
 }
 
 struct TupStruct(isize, isize, Box<str>);
@@ -206,7 +211,7 @@ fn matchSomeEnum(val: SomeEnum) {
     match val {
         SomeEnum::Ints(int1, int2) => { println(&(int1+int2).to_string()); }
         SomeEnum::Floats(float1, float2) => { println(&(float2*float1).to_string()); }
-        SomeEnum::Strings(_, _, s3) => { println(s3); }
+        SomeEnum::Strings(.., s3) => { println(s3); }
         SomeEnum::MyTypes(mt1, mt2) => { println(&(mt1.field1 - mt2.field1).to_string()); }
     }
 }
@@ -225,7 +230,7 @@ fn matchSomeStructEnum2(se: SomeStructEnum) {
     match se {
         EnumStruct{a: ref aaa, ..} => println(&aaa.to_string()),
         EnumStruct2{f1, f2: f2} => println(&f1.field1.to_string()),
-        EnumStruct3{f1, f3: SomeEnum::Ints(_, _), f2} => println(&f1.field1.to_string()),
+        EnumStruct3{f1, f3: SomeEnum::Ints(..), f2} => println(&f1.field1.to_string()),
         _ => {},
     }
 }
@@ -436,3 +441,27 @@ fn test_format_args() {
     print!("{0} + {} = {}", x, y);
     print!("x is {}, y is {1}, name is {n}", x, y, n = name);
 }
+
+
+union TestUnion {
+    f1: u32
+}
+
+struct FrameBuffer;
+
+struct SilenceGenerator;
+
+impl Iterator for SilenceGenerator {
+    type Item = FrameBuffer;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        panic!();
+    }
+}
+
+trait Foo {
+    type Bar = FrameBuffer;
+}
+
+#[doc(include="extra-docs.md")]
+struct StructWithDocs;

@@ -11,5 +11,6 @@
 #![no_std]
 #![feature(macro_reexport)]
 
-#[macro_reexport]  //~ ERROR bad macro reexport
+#[allow(unused_extern_crates)]
+#[macro_reexport]  //~ ERROR bad macro re-export
 extern crate std;

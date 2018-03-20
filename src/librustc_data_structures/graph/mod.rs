@@ -31,7 +31,7 @@
 //! be indexed by the direction (see the type `Direction`).
 
 use bitvec::BitVector;
-use std::fmt::{Formatter, Error, Debug};
+use std::fmt::Debug;
 use std::usize;
 use snapshot_vec::{SnapshotVec, SnapshotVecDelegate};
 
@@ -48,6 +48,7 @@ pub struct Node<N> {
     pub data: N,
 }
 
+#[derive(Debug)]
 pub struct Edge<E> {
     next_edge: [EdgeIndex; 2], // see module comment
     source: NodeIndex,
@@ -67,18 +68,6 @@ impl<N> SnapshotVecDelegate for Edge<N> {
     type Undo = ();
 
     fn reverse(_: &mut Vec<Edge<N>>, _: ()) {}
-}
-
-impl<E: Debug> Debug for Edge<E> {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
-        write!(f,
-               "Edge {{ next_edge: [{:?}, {:?}], source: {:?}, target: {:?}, data: {:?} }}",
-               self.next_edge[0],
-               self.next_edge[1],
-               self.source,
-               self.target,
-               self.data)
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -106,18 +95,18 @@ impl NodeIndex {
     }
 }
 
-impl EdgeIndex {
-    /// Returns unique id (unique with respect to the graph holding associated edge).
-    pub fn edge_id(&self) -> usize {
-        self.0
-    }
-}
-
 impl<N: Debug, E: Debug> Graph<N, E> {
     pub fn new() -> Graph<N, E> {
         Graph {
             nodes: SnapshotVec::new(),
             edges: SnapshotVec::new(),
+        }
+    }
+
+    pub fn with_capacity(nodes: usize, edges: usize) -> Graph<N, E> {
+        Graph {
+            nodes: SnapshotVec::with_capacity(nodes),
+            edges: SnapshotVec::with_capacity(edges),
         }
     }
 
@@ -153,7 +142,7 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         let idx = self.next_node_index();
         self.nodes.push(Node {
             first_edge: [INVALID_EDGE_INDEX, INVALID_EDGE_INDEX],
-            data: data,
+            data,
         });
         idx
     }
@@ -189,9 +178,9 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         // as the next pointers
         self.edges.push(Edge {
             next_edge: [source_first, target_first],
-            source: source,
-            target: target,
-            data: data,
+            source,
+            target,
+            data,
         });
 
         // adjust the firsts for each node target be the next object.
@@ -201,48 +190,36 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         return idx;
     }
 
-    pub fn mut_edge_data(&mut self, idx: EdgeIndex) -> &mut E {
-        &mut self.edges[idx.0].data
-    }
-
-    pub fn edge_data(&self, idx: EdgeIndex) -> &E {
-        &self.edges[idx.0].data
-    }
-
     pub fn edge(&self, idx: EdgeIndex) -> &Edge<E> {
         &self.edges[idx.0]
     }
 
-    pub fn first_adjacent(&self, node: NodeIndex, dir: Direction) -> EdgeIndex {
-        //! Accesses the index of the first edge adjacent to `node`.
-        //! This is useful if you wish to modify the graph while walking
-        //! the linked list of edges.
-
-        self.nodes[node.0].first_edge[dir.repr]
-    }
-
-    pub fn next_adjacent(&self, edge: EdgeIndex, dir: Direction) -> EdgeIndex {
-        //! Accesses the next edge in a given direction.
-        //! This is useful if you wish to modify the graph while walking
-        //! the linked list of edges.
-
-        self.edges[edge.0].next_edge[dir.repr]
-    }
-
     // # Iterating over nodes, edges
 
-    pub fn each_node<'a, F>(&'a self, mut f: F) -> bool
-        where F: FnMut(NodeIndex, &'a Node<N>) -> bool
-    {
-        //! Iterates over all edges defined in the graph.
-        self.nodes.iter().enumerate().all(|(i, node)| f(NodeIndex(i), node))
+    pub fn enumerated_nodes(&self) -> impl Iterator<Item = (NodeIndex, &Node<N>)> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, n)| (NodeIndex(idx), n))
     }
 
-    pub fn each_edge<'a, F>(&'a self, mut f: F) -> bool
-        where F: FnMut(EdgeIndex, &'a Edge<E>) -> bool
-    {
+    pub fn enumerated_edges(&self) -> impl Iterator<Item = (EdgeIndex, &Edge<E>)> {
+        self.edges
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (EdgeIndex(idx), e))
+    }
+
+    pub fn each_node<'a>(&'a self, mut f: impl FnMut(NodeIndex, &'a Node<N>) -> bool) -> bool {
+        //! Iterates over all edges defined in the graph.
+        self.enumerated_nodes()
+            .all(|(node_idx, node)| f(node_idx, node))
+    }
+
+    pub fn each_edge<'a>(&'a self, mut f: impl FnMut(EdgeIndex, &'a Edge<E>) -> bool) -> bool {
         //! Iterates over all edges defined in the graph
-        self.edges.iter().enumerate().all(|(i, edge)| f(EdgeIndex(i), edge))
+        self.enumerated_edges()
+            .all(|(edge_idx, edge)| f(edge_idx, edge))
     }
 
     pub fn outgoing_edges(&self, source: NodeIndex) -> AdjacentEdges<N, E> {
@@ -257,68 +234,90 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         let first_edge = self.node(source).first_edge[direction.repr];
         AdjacentEdges {
             graph: self,
-            direction: direction,
+            direction,
             next: first_edge,
         }
     }
 
-    pub fn successor_nodes(&self, source: NodeIndex) -> AdjacentTargets<N, E> {
+    pub fn successor_nodes<'a>(
+        &'a self,
+        source: NodeIndex,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
         self.outgoing_edges(source).targets()
     }
 
-    pub fn predecessor_nodes(&self, target: NodeIndex) -> AdjacentSources<N, E> {
+    pub fn predecessor_nodes<'a>(
+        &'a self,
+        target: NodeIndex,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
         self.incoming_edges(target).sources()
     }
 
-    // # Fixed-point iteration
-    //
-    // A common use for graphs in our compiler is to perform
-    // fixed-point iteration. In this case, each edge represents a
-    // constraint, and the nodes themselves are associated with
-    // variables or other bitsets. This method facilitates such a
-    // computation.
-
-    pub fn iterate_until_fixed_point<'a, F>(&'a self, mut op: F)
-        where F: FnMut(usize, EdgeIndex, &'a Edge<E>) -> bool
-    {
-        let mut iteration = 0;
-        let mut changed = true;
-        while changed {
-            changed = false;
-            iteration += 1;
-            for (i, edge) in self.edges.iter().enumerate() {
-                changed |= op(iteration, EdgeIndex(i), edge);
-            }
-        }
+    pub fn depth_traverse<'a>(
+        &'a self,
+        start: NodeIndex,
+        direction: Direction,
+    ) -> DepthFirstTraversal<'a, N, E> {
+        DepthFirstTraversal::with_start_node(self, start, direction)
     }
 
-    pub fn depth_traverse<'a>(&'a self, start: NodeIndex) -> DepthFirstTraversal<'a, N, E> {
-        DepthFirstTraversal {
-            graph: self,
-            stack: vec![start],
-            visited: BitVector::new(self.nodes.len()),
+    pub fn nodes_in_postorder<'a>(
+        &'a self,
+        direction: Direction,
+        entry_node: NodeIndex,
+    ) -> Vec<NodeIndex> {
+        let mut visited = BitVector::new(self.len_nodes());
+        let mut stack = vec![];
+        let mut result = Vec::with_capacity(self.len_nodes());
+        let mut push_node = |stack: &mut Vec<_>, node: NodeIndex| {
+            if visited.insert(node.0) {
+                stack.push((node, self.adjacent_edges(node, direction)));
+            }
+        };
+
+        for node in Some(entry_node)
+            .into_iter()
+            .chain(self.enumerated_nodes().map(|(node, _)| node))
+        {
+            push_node(&mut stack, node);
+            while let Some((node, mut iter)) = stack.pop() {
+                if let Some((_, child)) = iter.next() {
+                    let target = child.source_or_target(direction);
+                    // the current node needs more processing, so
+                    // add it back to the stack
+                    stack.push((node, iter));
+                    // and then push the new node
+                    push_node(&mut stack, target);
+                } else {
+                    result.push(node);
+                }
+            }
         }
+
+        assert_eq!(result.len(), self.len_nodes());
+        result
     }
 }
 
 // # Iterators
 
 pub struct AdjacentEdges<'g, N, E>
-    where N: 'g,
-          E: 'g
+where
+    N: 'g,
+    E: 'g,
 {
     graph: &'g Graph<N, E>,
     direction: Direction,
     next: EdgeIndex,
 }
 
-impl<'g, N, E> AdjacentEdges<'g, N, E> {
-    fn targets(self) -> AdjacentTargets<'g, N, E> {
-        AdjacentTargets { edges: self }
+impl<'g, N: Debug, E: Debug> AdjacentEdges<'g, N, E> {
+    fn targets(self) -> impl Iterator<Item = NodeIndex> + 'g {
+        self.into_iter().map(|(_, edge)| edge.target)
     }
 
-    fn sources(self) -> AdjacentSources<'g, N, E> {
-        AdjacentSources { edges: self }
+    fn sources(self) -> impl Iterator<Item = NodeIndex> + 'g {
+        self.into_iter().map(|(_, edge)| edge.source)
     }
 }
 
@@ -337,74 +336,52 @@ impl<'g, N: Debug, E: Debug> Iterator for AdjacentEdges<'g, N, E> {
     }
 }
 
-pub struct AdjacentTargets<'g, N: 'g, E: 'g>
-    where N: 'g,
-          E: 'g
+pub struct DepthFirstTraversal<'g, N, E>
+where
+    N: 'g,
+    E: 'g,
 {
-    edges: AdjacentEdges<'g, N, E>,
-}
-
-impl<'g, N: Debug, E: Debug> Iterator for AdjacentTargets<'g, N, E> {
-    type Item = NodeIndex;
-
-    fn next(&mut self) -> Option<NodeIndex> {
-        self.edges.next().map(|(_, edge)| edge.target)
-    }
-}
-
-pub struct AdjacentSources<'g, N: 'g, E: 'g>
-    where N: 'g,
-          E: 'g
-{
-    edges: AdjacentEdges<'g, N, E>,
-}
-
-impl<'g, N: Debug, E: Debug> Iterator for AdjacentSources<'g, N, E> {
-    type Item = NodeIndex;
-
-    fn next(&mut self) -> Option<NodeIndex> {
-        self.edges.next().map(|(_, edge)| edge.source)
-    }
-}
-
-pub struct DepthFirstTraversal<'g, N: 'g, E: 'g> {
     graph: &'g Graph<N, E>,
     stack: Vec<NodeIndex>,
     visited: BitVector,
+    direction: Direction,
+}
+
+impl<'g, N: Debug, E: Debug> DepthFirstTraversal<'g, N, E> {
+    pub fn with_start_node(
+        graph: &'g Graph<N, E>,
+        start_node: NodeIndex,
+        direction: Direction,
+    ) -> Self {
+        let mut visited = BitVector::new(graph.len_nodes());
+        visited.insert(start_node.node_id());
+        DepthFirstTraversal {
+            graph,
+            stack: vec![start_node],
+            visited,
+            direction,
+        }
+    }
+
+    fn visit(&mut self, node: NodeIndex) {
+        if self.visited.insert(node.node_id()) {
+            self.stack.push(node);
+        }
+    }
 }
 
 impl<'g, N: Debug, E: Debug> Iterator for DepthFirstTraversal<'g, N, E> {
     type Item = NodeIndex;
 
     fn next(&mut self) -> Option<NodeIndex> {
-        while let Some(idx) = self.stack.pop() {
-            if !self.visited.insert(idx.node_id()) {
-                continue;
+        let next = self.stack.pop();
+        if let Some(idx) = next {
+            for (_, edge) in self.graph.adjacent_edges(idx, self.direction) {
+                let target = edge.source_or_target(self.direction);
+                self.visit(target);
             }
-
-            for (_, edge) in self.graph.outgoing_edges(idx) {
-                if !self.visited.contains(edge.target().node_id()) {
-                    self.stack.push(edge.target());
-                }
-            }
-
-            return Some(idx);
         }
-
-        return None;
-    }
-}
-
-pub fn each_edge_index<F>(max_edge_index: EdgeIndex, mut f: F)
-    where F: FnMut(EdgeIndex) -> bool
-{
-    let mut i = 0;
-    let n = max_edge_index.0;
-    while i < n {
-        if !f(EdgeIndex(i)) {
-            return;
-        }
-        i += 1;
+        next
     }
 }
 

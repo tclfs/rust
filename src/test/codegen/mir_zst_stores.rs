@@ -10,18 +10,18 @@
 
 // compile-flags: -C no-prepopulate-passes
 
-#![feature(rustc_attrs)]
 #![crate_type = "lib"]
 use std::marker::PhantomData;
 
-
+#[derive(Copy, Clone)]
 struct Zst { phantom: PhantomData<Zst> }
 
 // CHECK-LABEL: @mir
+// CHECK-NOT: store{{.*}}undef
 #[no_mangle]
-#[rustc_mir]
-fn mir(){
-    // CHECK-NOT: getelementptr
-    // CHECK-NOT: store{{.*}}undef
+pub fn mir() {
     let x = Zst { phantom: PhantomData };
+    let y = (x, 0);
+    drop(y);
+    drop((0, x));
 }

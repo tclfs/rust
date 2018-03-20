@@ -10,13 +10,13 @@
 
 // aux-build:empty-struct.rs
 
-#![feature(associated_consts)]
 
 extern crate empty_struct;
 use empty_struct::XEmpty2 as XFoo;
 
 struct Foo;
 
+#[derive(PartialEq, Eq)]
 enum Bar {
     Var1,
     Var2,

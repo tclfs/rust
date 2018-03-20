@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-wasm32-bare no libc for ffi testing
+
 // Test a foreign function that accepts and returns a struct
 // by value.
 
@@ -16,7 +18,7 @@ pub struct TwoU64s {
     one: u64, two: u64
 }
 
-#[link(name = "rust_test_helpers")]
+#[link(name = "rust_test_helpers", kind = "static")]
 extern {
     pub fn rust_dbg_extern_identity_TwoU64s(v: TwoU64s) -> TwoU64s;
 }

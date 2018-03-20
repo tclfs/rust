@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Can't use unit struct as enum pattern
+// Can't use unit struct as tuple struct pattern
 
 // aux-build:empty-struct.rs
 
@@ -21,43 +21,39 @@ enum E {
     Empty4
 }
 
-// remove attribute after warning cycle and promoting warnings to errors
 fn main() {
     let e2 = Empty2;
     let e4 = E::Empty4;
     let xe2 = XEmpty2;
     let xe4 = XE::XEmpty4;
 
-    // Rejected by parser as yet
-    // match e2 {
-    //     Empty2() => () // ERROR `Empty2` does not name a tuple variant or a tuple struct
-    // }
-    // match xe2 {
-    //     XEmpty2() => () // ERROR `XEmpty2` does not name a tuple variant or a tuple struct
-    // }
     match e2 {
-        Empty2(..) => () //~ ERROR `Empty2` does not name a tuple variant or a tuple struct
-            //~^ ERROR hard error
+        Empty2() => () //~ ERROR expected tuple struct/variant, found unit struct `Empty2`
     }
     match xe2 {
-        XEmpty2(..) => () //~ ERROR `XEmpty2` does not name a tuple variant or a tuple struct
-            //~^ ERROR hard error
+        XEmpty2() => () //~ ERROR expected tuple struct/variant, found unit struct `XEmpty2`
     }
-    // Rejected by parser as yet
-    // match e4 {
-    //     E::Empty4() => () // ERROR `E::Empty4` does not name a tuple variant or a tuple struct
-    // }
-    // match xe4 {
-    //     XE::XEmpty4() => (), // ERROR `XE::XEmpty4` does not name a tuple variant or a tuple
-    //     _ => {},
-    // }
+    match e2 {
+        Empty2(..) => () //~ ERROR expected tuple struct/variant, found unit struct `Empty2`
+    }
+    match xe2 {
+        XEmpty2(..) => () //~ ERROR expected tuple struct/variant, found unit struct `XEmpty2`
+    }
+
     match e4 {
-        E::Empty4(..) => () //~ ERROR `E::Empty4` does not name a tuple variant or a tuple struct
-            //~^ ERROR hard error
+        E::Empty4() => () //~ ERROR expected tuple struct/variant, found unit variant `E::Empty4`
     }
     match xe4 {
-        XE::XEmpty4(..) => (), //~ ERROR `XE::XEmpty4` does not name a tuple variant or a tuple
-            //~^ ERROR hard error
+        XE::XEmpty4() => (),
+        //~^ ERROR expected tuple struct/variant, found unit variant `XE::XEmpty4`
+        _ => {},
+    }
+    match e4 {
+        E::Empty4(..) => () //~ ERROR expected tuple struct/variant, found unit variant `E::Empty4`
+    }
+    match xe4 {
+        XE::XEmpty4(..) => (),
+        //~^ ERROR expected tuple struct/variant, found unit variant `XE::XEmpty4`
         _ => {},
     }
 }

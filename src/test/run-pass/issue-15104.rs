@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
 #![feature(slice_patterns)]
 
 fn main() {
@@ -16,9 +15,9 @@ fn main() {
 }
 
 fn count_members(v: &[usize]) -> usize {
-    match v {
+    match *v {
         []         => 0,
         [_]        => 1,
-        [_x, xs..] => 1 + count_members(xs)
+        [_, ref xs..] => 1 + count_members(xs)
     }
 }

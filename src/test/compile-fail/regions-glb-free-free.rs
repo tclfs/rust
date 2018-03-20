@@ -11,7 +11,7 @@
 mod argparse {
     pub struct Flag<'a> {
         name: &'a str,
-        desc: &'a str,
+        pub desc: &'a str,
         max_count: usize,
         value: usize
     }
@@ -22,9 +22,9 @@ mod argparse {
 
     impl<'a> Flag<'a> {
         pub fn set_desc(self, s: &str) -> Flag<'a> {
-            Flag {
+            Flag { //~ ERROR 25:13: 30:14: explicit lifetime required in the type of `s` [E0621]
                 name: self.name,
-                desc: s, //~ ERROR cannot infer an appropriate lifetime for automatic coercion due t
+                desc: s,
                 max_count: self.max_count,
                 value: self.value
             }

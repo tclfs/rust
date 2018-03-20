@@ -16,25 +16,9 @@ fn main() {
     match (true, false) {
         A::B => (),
         //~^ ERROR mismatched types
-        //~| expected `(bool, bool)`
-        //~| found `A`
-        //~| expected tuple
-        //~| found enum `A`
+        //~| expected type `(bool, bool)`
+        //~| found type `A`
+        //~| expected tuple, found enum `A`
         _ => ()
-    }
-
-    match &Some(42) {
-        Some(x) => (),
-        //~^ ERROR mismatched types
-        //~| expected `&core::option::Option<_>`
-        //~| found `core::option::Option<_>`
-        //~| expected &-ptr
-        //~| found enum `core::option::Option`
-        None => ()
-        //~^ ERROR mismatched types
-        //~| expected `&core::option::Option<_>`
-        //~| found `core::option::Option<_>`
-        //~| expected &-ptr
-        //~| found enum `core::option::Option`
     }
 }

@@ -10,6 +10,7 @@
 
 // Test paths to associated types using the type-parameter-only sugar.
 
+use std::ops::Deref;
 
 pub trait Foo {
     type A;

@@ -10,16 +10,19 @@
 
 // We disable tail merging here because it can't preserve debuginfo and thus
 // potentially breaks the backtraces. Also, subtle changes can decide whether
-// tail merging suceeds, so the test might work today but fail tomorrow due to a
+// tail merging succeeds, so the test might work today but fail tomorrow due to a
 // seemingly completely unrelated change.
 // Unfortunately, LLVM has no "disable" option for this, so we have to set
 // "enable" to 0 instead.
 
-// compile-flags:-g -Cllvm-args=-enable-tail-merge=0
-// ignore-pretty as this critically relies on line numbers
+// compile-flags:-g -Cllvm-args=-enable-tail-merge=0 -Cllvm-args=-opt-bisect-limit=0
+// ignore-pretty issue #37195
+// ignore-cloudabi spawning processes is not supported
+// ignore-emscripten spawning processes is not supported
 
-use std::io;
-use std::io::prelude::*;
+// note that above `-opt-bisect-limit=0` is used to basically disable
+// optimizations
+
 use std::env;
 
 #[path = "backtrace-debuginfo-aux.rs"] mod aux;
@@ -32,11 +35,12 @@ macro_rules! dump_and_die {
     ($($pos:expr),*) => ({
         // FIXME(#18285): we cannot include the current position because
         // the macro span takes over the last frame's file/line.
-        if cfg!(target_os = "macos") ||
-           cfg!(target_os = "ios") ||
-           cfg!(target_os = "android") ||
-           cfg!(all(target_os = "linux", target_arch = "arm")) ||
-           cfg!(all(windows, target_env = "gnu")) {
+        if cfg!(any(target_os = "android",
+                    all(target_os = "linux", target_arch = "arm"),
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                    target_os = "bitrig",
+                    target_os = "openbsd")) {
             // skip these platforms as this support isn't implemented yet.
         } else {
             dump_filelines(&[$($pos),*]);
@@ -61,10 +65,7 @@ type Pos = (&'static str, u32);
 // this goes to stdout and each line has to be occurred
 // in the following backtrace to stderr with a correct order.
 fn dump_filelines(filelines: &[Pos]) {
-    // Skip top frame for MSVC, because it sees the macro rather than
-    // the containing function.
-    let skip = if cfg!(target_env = "msvc") {1} else {0};
-    for &(file, line) in filelines.iter().rev().skip(skip) {
+    for &(file, line) in filelines.iter().rev() {
         // extract a basename
         let basename = file.split(&['/', '\\'][..]).last().unwrap();
         println!("{}:{}", basename, line);
@@ -83,9 +84,7 @@ fn inner(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
     });
 }
 
-// LLVM does not yet output the required debug info to support showing inlined
-// function calls in backtraces when targetting MSVC, so disable inlining in
-// this case.
+// We emit the wrong location for the caller here when inlined on MSVC
 #[cfg_attr(not(target_env = "msvc"), inline(always))]
 #[cfg_attr(target_env = "msvc", inline(never))]
 fn inner_inlined(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
@@ -118,31 +117,37 @@ fn outer(mut counter: i32, main_pos: Pos) {
     inner_inlined(&mut counter, main_pos, pos!());
 }
 
-fn check_trace(output: &str, error: &str) {
+fn check_trace(output: &str, error: &str) -> Result<(), String> {
     // reverse the position list so we can start with the last item (which was the first line)
     let mut remaining: Vec<&str> = output.lines().map(|s| s.trim()).rev().collect();
 
-    assert!(error.contains("stack backtrace"), "no backtrace in the error: {}", error);
+    if !error.contains("stack backtrace") {
+        return Err(format!("no backtrace found in stderr:\n{}", error))
+    }
     for line in error.lines() {
         if !remaining.is_empty() && line.contains(remaining.last().unwrap()) {
             remaining.pop();
         }
     }
-    assert!(remaining.is_empty(),
-            "trace does not match position list: {}\n---\n{}", error, output);
+    if !remaining.is_empty() {
+        return Err(format!("trace does not match position list\n\
+            still need to find {:?}\n\n\
+            --- stdout\n{}\n\
+            --- stderr\n{}",
+            remaining, output, error))
+    }
+    Ok(())
 }
 
 fn run_test(me: &str) {
     use std::str;
     use std::process::Command;
 
-    let mut template = Command::new(me);
-    template.env("RUST_BACKTRACE", "1");
-
     let mut i = 0;
+    let mut errors = Vec::new();
     loop {
         let out = Command::new(me)
-                          .env("RUST_BACKTRACE", "1")
+                          .env("RUST_BACKTRACE", "full")
                           .arg(i.to_string()).output().unwrap();
         let output = str::from_utf8(&out.stdout).unwrap();
         let error = str::from_utf8(&out.stderr).unwrap();
@@ -150,9 +155,19 @@ fn run_test(me: &str) {
             assert!(output.contains("done."), "bad output for successful run: {}", output);
             break;
         } else {
-            check_trace(output, error);
+            if let Err(e) = check_trace(output, error) {
+                errors.push(e);
+            }
         }
         i += 1;
+    }
+    if errors.len() > 0 {
+        for error in errors {
+            println!("---------------------------------------");
+            println!("{}", error);
+        }
+
+        panic!("found some errors");
     }
 }
 
@@ -161,11 +176,10 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() >= 2 {
         let case = args[1].parse().unwrap();
-        writeln!(&mut io::stderr(), "test case {}", case).unwrap();
+        eprintln!("test case {}", case);
         outer(case, pos!());
         println!("done.");
     } else {
         run_test(&args[0]);
     }
 }
-

@@ -14,7 +14,7 @@
 #![feature(iter_empty)]
 #![feature(iter_once)]
 #![feature(iter_unfold)]
-#![feature(step_by)]
+#![feature(iterator_step_by)]
 #![feature(str_escape)]
 
 use std::iter::{empty, once, repeat};
@@ -67,7 +67,7 @@ macro_rules! is_sync_send {
 
 fn main() {
     // for char.rs
-    all_sync_send!("Я", escape_default, escape_unicode);
+    all_sync_send!("Я", escape_debug, escape_default, escape_unicode);
 
     // for iter.rs
     all_sync_send_mutable_ref!([1], iter);

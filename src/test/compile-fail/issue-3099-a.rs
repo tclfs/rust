@@ -10,6 +10,6 @@
 
 enum a { b, c }
 
-enum a { d, e } //~ ERROR duplicate definition of type or module `a`
+enum a { d, e } //~ ERROR the name `a` is defined multiple times
 
 fn main() {}

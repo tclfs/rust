@@ -9,16 +9,22 @@
 // except according to those terms.
 
 use bitvec::BitMatrix;
-use std::cell::RefCell;
+use fx::FxHashMap;
+use sync::Lock;
+use rustc_serialize::{Encodable, Encoder, Decodable, Decoder};
+use stable_hasher::{HashStable, StableHasher, StableHasherResult};
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::mem;
 
-#[derive(Clone)]
-pub struct TransitiveRelation<T: Debug + PartialEq> {
-    // List of elements. This is used to map from a T to a usize.  We
-    // expect domain to be small so just use a linear list versus a
-    // hashmap or something.
+
+#[derive(Clone, Debug)]
+pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash> {
+    // List of elements. This is used to map from a T to a usize.
     elements: Vec<T>,
+
+    // Maps each element to an index.
+    map: FxHashMap<T, Index>,
 
     // List of base edges in the graph. Require to compute transitive
     // closure.
@@ -26,50 +32,82 @@ pub struct TransitiveRelation<T: Debug + PartialEq> {
 
     // This is a cached transitive closure derived from the edges.
     // Currently, we build it lazilly and just throw out any existing
-    // copy whenever a new edge is added. (The RefCell is to permit
+    // copy whenever a new edge is added. (The Lock is to permit
     // the lazy computation.) This is kind of silly, except for the
     // fact its size is tied to `self.elements.len()`, so I wanted to
     // wait before building it up to avoid reallocating as new edges
     // are added with new elements. Perhaps better would be to ask the
     // user for a batch of edges to minimize this effect, but I
     // already wrote the code this way. :P -nmatsakis
-    closure: RefCell<Option<BitMatrix>>,
+    closure: Lock<Option<BitMatrix>>,
 }
 
-#[derive(Clone, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable, Debug)]
 struct Index(usize);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Debug)]
 struct Edge {
     source: Index,
     target: Index,
 }
 
-impl<T: Debug + PartialEq> TransitiveRelation<T> {
+impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
     pub fn new() -> TransitiveRelation<T> {
         TransitiveRelation {
             elements: vec![],
+            map: FxHashMap(),
             edges: vec![],
-            closure: RefCell::new(None),
+            closure: Lock::new(None),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
     }
 
     fn index(&self, a: &T) -> Option<Index> {
-        self.elements.iter().position(|e| *e == *a).map(Index)
+        self.map.get(a).cloned()
     }
 
     fn add_index(&mut self, a: T) -> Index {
-        match self.index(&a) {
-            Some(i) => i,
-            None => {
-                self.elements.push(a);
+        let &mut TransitiveRelation {
+            ref mut elements,
+            ref mut closure,
+            ref mut map,
+            ..
+        } = self;
 
-                // if we changed the dimensions, clear the cache
-                *self.closure.borrow_mut() = None;
+        map.entry(a.clone())
+           .or_insert_with(|| {
+               elements.push(a);
 
-                Index(self.elements.len() - 1)
+               // if we changed the dimensions, clear the cache
+               *closure.get_mut() = None;
+
+               Index(elements.len() - 1)
+           })
+           .clone()
+    }
+
+    /// Applies the (partial) function to each edge and returns a new
+    /// relation.  If `f` returns `None` for any end-point, returns
+    /// `None`.
+    pub fn maybe_map<F, U>(&self, mut f: F) -> Option<TransitiveRelation<U>>
+        where F: FnMut(&T) -> Option<U>,
+              U: Clone + Debug + Eq + Hash + Clone,
+    {
+        let mut result = TransitiveRelation::new();
+        for edge in &self.edges {
+            let r = f(&self.elements[edge.source.0]).and_then(|source| {
+                f(&self.elements[edge.target.0]).and_then(|target| {
+                    Some(result.add(source, target))
+                })
+            });
+            if r.is_none() {
+                return None;
             }
         }
+        Some(result)
     }
 
     /// Indicate that `a < b` (where `<` is this relation)
@@ -84,7 +122,7 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
             self.edges.push(edge);
 
             // added an edge, clear the cache
-            *self.closure.borrow_mut() = None;
+            *self.closure.get_mut() = None;
         }
     }
 
@@ -93,6 +131,21 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
         match (self.index(a), self.index(b)) {
             (Some(a), Some(b)) => self.with_closure(|closure| closure.contains(a.0, b.0)),
             (None, _) | (_, None) => false,
+        }
+    }
+
+    /// Thinking of `x R y` as an edge `x -> y` in a graph, this
+    /// returns all things reachable from `a`.
+    ///
+    /// Really this probably ought to be `impl Iterator<Item=&T>`, but
+    /// I'm too lazy to make that work, and -- given the caching
+    /// strategy -- it'd be a touch tricky anyhow.
+    pub fn reachable_from(&self, a: &T) -> Vec<&T> {
+        match self.index(a) {
+            Some(a) => self.with_closure(|closure| {
+                closure.iter(a.0).map(|i| &self.elements[i]).collect()
+            }),
+            None => vec![],
         }
     }
 
@@ -132,7 +185,14 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
     /// b -> b1
     /// ```
     pub fn postdom_upper_bound(&self, a: &T, b: &T) -> Option<&T> {
-        let mut mubs = self.minimal_upper_bounds(a, b);
+        let mubs = self.minimal_upper_bounds(a, b);
+        self.mutual_immediate_postdominator(mubs)
+    }
+
+    /// Viewing the relation as a graph, computes the "mutual
+    /// immediate postdominator" of a set of points (if one
+    /// exists). See `postdom_upper_bound` for details.
+    pub fn mutual_immediate_postdominator<'a>(&'a self, mut mubs: Vec<&'a T>) -> Option<&'a T> {
         loop {
             match mubs.len() {
                 0 => return None,
@@ -224,6 +284,8 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
             // After step 3, we know that no element can reach any of
             // its predecesssors (because of step 2) nor successors
             // (because we just called `pare_down`)
+            //
+            // This same algorithm is used in `parents` below.
 
             let mut candidates = closure.intersection(a.0, b.0); // (1)
             pare_down(&mut candidates, closure); // (2)
@@ -236,6 +298,59 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
                    .rev() // (4)
                    .map(|i| &self.elements[i])
                    .collect()
+    }
+
+    /// Given an element A, returns the maximal set {B} of elements B
+    /// such that
+    ///
+    /// - A != B
+    /// - A R B is true
+    /// - for each i, j: B[i] R B[j] does not hold
+    ///
+    /// The intuition is that this moves "one step up" through a lattice
+    /// (where the relation is encoding the `<=` relation for the lattice).
+    /// So e.g. if the relation is `->` and we have
+    ///
+    /// ```
+    /// a -> b -> d -> f
+    /// |              ^
+    /// +--> c -> e ---+
+    /// ```
+    ///
+    /// then `parents(a)` returns `[b, c]`. The `postdom_parent` function
+    /// would further reduce this to just `f`.
+    pub fn parents(&self, a: &T) -> Vec<&T> {
+        let a = match self.index(a) {
+            Some(a) => a,
+            None => return vec![]
+        };
+
+        // Steal the algorithm for `minimal_upper_bounds` above, but
+        // with a slight tweak. In the case where `a R a`, we remove
+        // that from the set of candidates.
+        let ancestors = self.with_closure(|closure| {
+            let mut ancestors = closure.intersection(a.0, a.0);
+
+            // Remove anything that can reach `a`. If this is a
+            // reflexive relation, this will include `a` itself.
+            ancestors.retain(|&e| !closure.contains(e, a.0));
+
+            pare_down(&mut ancestors, closure); // (2)
+            ancestors.reverse(); // (3a)
+            pare_down(&mut ancestors, closure); // (3b)
+            ancestors
+        });
+
+        ancestors.into_iter()
+                 .rev() // (4)
+                 .map(|i| &self.elements[i])
+                 .collect()
+    }
+
+    /// A "best" parent in some sense. See `parents` and
+    /// `postdom_upper_bound` for more details.
+    pub fn postdom_parent(&self, a: &T) -> Option<&T> {
+        self.mutual_immediate_postdominator(self.parents(a))
     }
 
     fn with_closure<OP, R>(&self, op: OP) -> R
@@ -252,7 +367,8 @@ impl<T: Debug + PartialEq> TransitiveRelation<T> {
     }
 
     fn compute_closure(&self) -> BitMatrix {
-        let mut matrix = BitMatrix::new(self.elements.len());
+        let mut matrix = BitMatrix::new(self.elements.len(),
+                                        self.elements.len());
         let mut changed = true;
         while changed {
             changed = false;
@@ -304,6 +420,79 @@ fn pare_down(candidates: &mut Vec<usize>, closure: &BitMatrix) {
     }
 }
 
+impl<T> Encodable for TransitiveRelation<T>
+    where T: Clone + Encodable + Debug + Eq + Hash + Clone
+{
+    fn encode<E: Encoder>(&self, s: &mut E) -> Result<(), E::Error> {
+        s.emit_struct("TransitiveRelation", 2, |s| {
+            s.emit_struct_field("elements", 0, |s| self.elements.encode(s))?;
+            s.emit_struct_field("edges", 1, |s| self.edges.encode(s))?;
+            Ok(())
+        })
+    }
+}
+
+impl<T> Decodable for TransitiveRelation<T>
+    where T: Clone + Decodable + Debug + Eq + Hash + Clone
+{
+    fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
+        d.read_struct("TransitiveRelation", 2, |d| {
+            let elements: Vec<T> = d.read_struct_field("elements", 0, |d| Decodable::decode(d))?;
+            let edges = d.read_struct_field("edges", 1, |d| Decodable::decode(d))?;
+            let map = elements.iter()
+                              .enumerate()
+                              .map(|(index, elem)| (elem.clone(), Index(index)))
+                              .collect();
+            Ok(TransitiveRelation { elements, edges, map, closure: Lock::new(None) })
+        })
+    }
+}
+
+impl<CTX, T> HashStable<CTX> for TransitiveRelation<T>
+    where T: HashStable<CTX> + Eq + Debug + Clone + Hash
+{
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        // We are assuming here that the relation graph has been built in a
+        // deterministic way and we can just hash it the way it is.
+        let TransitiveRelation {
+            ref elements,
+            ref edges,
+            // "map" is just a copy of elements vec
+            map: _,
+            // "closure" is just a copy of the data above
+            closure: _
+        } = *self;
+
+        elements.hash_stable(hcx, hasher);
+        edges.hash_stable(hcx, hasher);
+    }
+}
+
+impl<CTX> HashStable<CTX> for Edge {
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        let Edge {
+            ref source,
+            ref target,
+        } = *self;
+
+        source.hash_stable(hcx, hasher);
+        target.hash_stable(hcx, hasher);
+    }
+}
+
+impl<CTX> HashStable<CTX> for Index {
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        let Index(idx) = *self;
+        idx.hash_stable(hcx, hasher);
+    }
+}
+
 #[test]
 fn test_one_step() {
     let mut relation = TransitiveRelation::new();
@@ -342,11 +531,17 @@ fn test_many_steps() {
 }
 
 #[test]
-fn mubs_triange() {
+fn mubs_triangle() {
+    // a -> tcx
+    //      ^
+    //      |
+    //      b
     let mut relation = TransitiveRelation::new();
     relation.add("a", "tcx");
     relation.add("b", "tcx");
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"), vec![&"tcx"]);
+    assert_eq!(relation.parents(&"a"), vec![&"tcx"]);
+    assert_eq!(relation.parents(&"b"), vec![&"tcx"]);
 }
 
 #[test]
@@ -372,6 +567,9 @@ fn mubs_best_choice1() {
     relation.add("3", "2");
 
     assert_eq!(relation.minimal_upper_bounds(&"0", &"3"), vec![&"2"]);
+    assert_eq!(relation.parents(&"0"), vec![&"2"]);
+    assert_eq!(relation.parents(&"2"), vec![&"1"]);
+    assert!(relation.parents(&"1").is_empty());
 }
 
 #[test]
@@ -396,6 +594,9 @@ fn mubs_best_choice2() {
     relation.add("3", "2");
 
     assert_eq!(relation.minimal_upper_bounds(&"0", &"3"), vec![&"1"]);
+    assert_eq!(relation.parents(&"0"), vec![&"1"]);
+    assert_eq!(relation.parents(&"1"), vec![&"2"]);
+    assert!(relation.parents(&"2").is_empty());
 }
 
 #[test]
@@ -410,10 +611,15 @@ fn mubs_no_best_choice() {
     relation.add("3", "2");
 
     assert_eq!(relation.minimal_upper_bounds(&"0", &"3"), vec![&"1", &"2"]);
+    assert_eq!(relation.parents(&"0"), vec![&"1", &"2"]);
+    assert_eq!(relation.parents(&"3"), vec![&"1", &"2"]);
 }
 
 #[test]
 fn mubs_best_choice_scc() {
+    // in this case, 1 and 2 form a cycle; we pick arbitrarily (but
+    // consistently).
+
     let mut relation = TransitiveRelation::new();
     relation.add("0", "1");
     relation.add("0", "2");
@@ -425,6 +631,7 @@ fn mubs_best_choice_scc() {
     relation.add("3", "2");
 
     assert_eq!(relation.minimal_upper_bounds(&"0", &"3"), vec![&"1"]);
+    assert_eq!(relation.parents(&"0"), vec![&"1"]);
 }
 
 #[test]
@@ -446,6 +653,8 @@ fn pdub_crisscross() {
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"),
                vec![&"a1", &"b1"]);
     assert_eq!(relation.postdom_upper_bound(&"a", &"b"), Some(&"x"));
+    assert_eq!(relation.postdom_parent(&"a"), Some(&"x"));
+    assert_eq!(relation.postdom_parent(&"b"), Some(&"x"));
 }
 
 #[test]
@@ -477,6 +686,9 @@ fn pdub_crisscross_more() {
     assert_eq!(relation.minimal_upper_bounds(&"a1", &"b1"),
                vec![&"a2", &"b2"]);
     assert_eq!(relation.postdom_upper_bound(&"a", &"b"), Some(&"x"));
+
+    assert_eq!(relation.postdom_parent(&"a"), Some(&"x"));
+    assert_eq!(relation.postdom_parent(&"b"), Some(&"x"));
 }
 
 #[test]
@@ -494,6 +706,11 @@ fn pdub_lub() {
 
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"), vec![&"x"]);
     assert_eq!(relation.postdom_upper_bound(&"a", &"b"), Some(&"x"));
+
+    assert_eq!(relation.postdom_parent(&"a"), Some(&"a1"));
+    assert_eq!(relation.postdom_parent(&"b"), Some(&"b1"));
+    assert_eq!(relation.postdom_parent(&"a1"), Some(&"x"));
+    assert_eq!(relation.postdom_parent(&"b1"), Some(&"x"));
 }
 
 #[test]
@@ -594,4 +811,40 @@ fn mubs_scc_4() {
     relation.add("b", "e");
 
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"), vec![&"c"]);
+}
+
+#[test]
+fn parent() {
+    // An example that was misbehaving in the compiler.
+    //
+    // 4 -> 1 -> 3
+    //   \  |   /
+    //    \ v  /
+    // 2 -> 0
+    //
+    // plus a bunch of self-loops
+    //
+    // Here `->` represents `<=` and `0` is `'static`.
+
+    let pairs = vec![
+        (2, /*->*/ 0),
+        (2, /*->*/ 2),
+        (0, /*->*/ 0),
+        (0, /*->*/ 0),
+        (1, /*->*/ 0),
+        (1, /*->*/ 1),
+        (3, /*->*/ 0),
+        (3, /*->*/ 3),
+        (4, /*->*/ 0),
+        (4, /*->*/ 1),
+        (1, /*->*/ 3),
+    ];
+
+    let mut relation = TransitiveRelation::new();
+    for (a, b) in pairs {
+        relation.add(a, b);
+    }
+
+    let p = relation.postdom_parent(&3);
+    assert_eq!(p, Some(&0));
 }

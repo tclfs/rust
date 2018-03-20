@@ -7,9 +7,11 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-#![feature(rustc_attrs)]
-// compile-flags: -Z no-landing-pads
+
+// compile-flags: -Z no-landing-pads -C codegen-units=1
 // error-pattern:diverging_fn called
+// ignore-cloudabi no std::process
+
 use std::io::{self, Write};
 
 struct Droppable;
@@ -23,7 +25,6 @@ fn diverging_fn() -> ! {
     panic!("diverging_fn called")
 }
 
-#[rustc_mir]
 fn mir(d: Droppable) {
     let x = Droppable;
     diverging_fn();

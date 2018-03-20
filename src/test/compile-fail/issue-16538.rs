@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(safe_extern_statics)]
+
 mod Y {
     pub type X = usize;
     extern {
@@ -19,7 +21,7 @@ mod Y {
 }
 
 static foo: *const Y::X = Y::foo(Y::x as *const Y::X);
-//~^ ERROR the trait `core::marker::Sync` is not implemented for the type
+//~^ ERROR `*const usize` cannot be shared between threads safely [E0277]
 //~| ERROR cannot refer to other statics by value, use the address-of operator or a constant instead
 //~| ERROR E0015
 

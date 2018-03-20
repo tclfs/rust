@@ -12,17 +12,17 @@ struct T;
 
 mod t1 {
     type Foo = ::T;
-    mod Foo {} //~ ERROR: duplicate definition of type or module `Foo`
+    mod Foo {} //~ ERROR the name `Foo` is defined multiple times
 }
 
 mod t2 {
     type Foo = ::T;
-    struct Foo; //~ ERROR: duplicate definition of type or module `Foo`
+    struct Foo; //~ ERROR the name `Foo` is defined multiple times
 }
 
 mod t3 {
     type Foo = ::T;
-    enum Foo {} //~ ERROR: duplicate definition of type or module `Foo`
+    enum Foo {} //~ ERROR the name `Foo` is defined multiple times
 }
 
 mod t4 {
@@ -32,7 +32,7 @@ mod t4 {
 
 mod t5 {
     type Bar<T> = T;
-    mod Bar {} //~ ERROR: duplicate definition of type or module `Bar`
+    mod Bar {} //~ ERROR the name `Bar` is defined multiple times
 }
 
 mod t6 {

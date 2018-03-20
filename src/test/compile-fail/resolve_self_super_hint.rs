@@ -8,19 +8,26 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(alloc)]
+#![allow(unused_extern_crates)]
+
 mod a {
-    extern crate collections;
-    use collections::HashMap;
-//~^ ERROR unresolved import `collections::HashMap`. Did you mean `self::collections`?
+    extern crate alloc;
+    use alloc::HashMap;
+    //~^ ERROR unresolved import `alloc` [E0432]
+    //~| Did you mean `self::alloc`?
     mod b {
-        use collections::HashMap;
-//~^ ERROR unresolved import `collections::HashMap`. Did you mean `a::collections`?
+        use alloc::HashMap;
+        //~^ ERROR unresolved import `alloc` [E0432]
+        //~| Did you mean `a::alloc`?
         mod c {
-            use collections::HashMap;
-//~^ ERROR unresolved import `collections::HashMap`. Did you mean `a::collections`?
+            use alloc::HashMap;
+            //~^ ERROR unresolved import `alloc` [E0432]
+            //~| Did you mean `a::alloc`?
             mod d {
-                use collections::HashMap;
-//~^ ERROR unresolved import `collections::HashMap`. Did you mean `a::collections`?
+                use alloc::HashMap;
+                //~^ ERROR unresolved import `alloc` [E0432]
+                //~| Did you mean `a::alloc`?
             }
         }
     }

@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: -Z parse-only
+// compile-flags: -Z parse-only -Z continue-parse-after-error
 
 // ignore-tidy-cr
 // ignore-tidy-tab
 fn main() {
     // these literals are just silly.
     ''';
-    //~^ ERROR: character constant must be escaped: \'
+    //~^ ERROR: character constant must be escaped: '
 
     // note that this is a literal "\n" byte
     '

@@ -18,7 +18,11 @@ use std::path::Path;
 use std::slice;
 use std::str;
 
-pub struct ArchiveRO { ptr: ArchiveRef }
+pub struct ArchiveRO {
+    ptr: ArchiveRef,
+}
+
+unsafe impl Send for ArchiveRO {}
 
 pub struct Iter<'a> {
     archive: &'a ArchiveRO,
@@ -37,14 +41,14 @@ impl ArchiveRO {
     ///
     /// If this archive is used with a mutable method, then an error will be
     /// raised.
-    pub fn open(dst: &Path) -> Option<ArchiveRO> {
+    pub fn open(dst: &Path) -> Result<ArchiveRO, String> {
         return unsafe {
             let s = path2cstr(dst);
             let ar = ::LLVMRustOpenArchive(s.as_ptr());
             if ar.is_null() {
-                None
+                Err(::last_error().unwrap_or("failed to open archive".to_string()))
             } else {
-                Some(ArchiveRO { ptr: ar })
+                Ok(ArchiveRO { ptr: ar })
             }
         };
 
@@ -61,11 +65,16 @@ impl ArchiveRO {
         }
     }
 
-    pub fn raw(&self) -> ArchiveRef { self.ptr }
+    pub fn raw(&self) -> ArchiveRef {
+        self.ptr
+    }
 
     pub fn iter(&self) -> Iter {
         unsafe {
-            Iter { ptr: ::LLVMRustArchiveIteratorNew(self.ptr), archive: self }
+            Iter {
+                ptr: ::LLVMRustArchiveIteratorNew(self.ptr),
+                archive: self,
+            }
         }
     }
 }
@@ -86,7 +95,10 @@ impl<'a> Iterator for Iter<'a> {
         if ptr.is_null() {
             ::last_error().map(Err)
         } else {
-            Some(Ok(Child { ptr: ptr, _data: marker::PhantomData }))
+            Some(Ok(Child {
+                ptr,
+                _data: marker::PhantomData,
+            }))
         }
     }
 }
@@ -107,8 +119,7 @@ impl<'a> Child<'a> {
             if name_ptr.is_null() {
                 None
             } else {
-                let name = slice::from_raw_parts(name_ptr as *const u8,
-                                                 name_len as usize);
+                let name = slice::from_raw_parts(name_ptr as *const u8, name_len as usize);
                 str::from_utf8(name).ok().map(|s| s.trim())
             }
         }
@@ -125,11 +136,15 @@ impl<'a> Child<'a> {
         }
     }
 
-    pub fn raw(&self) -> ::ArchiveChildRef { self.ptr }
+    pub fn raw(&self) -> ::ArchiveChildRef {
+        self.ptr
+    }
 }
 
 impl<'a> Drop for Child<'a> {
     fn drop(&mut self) {
-        unsafe { ::LLVMRustArchiveChildFree(self.ptr); }
+        unsafe {
+            ::LLVMRustArchiveChildFree(self.ptr);
+        }
     }
 }

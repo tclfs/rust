@@ -21,17 +21,16 @@ fn main() {
     let e1 = Empty1 {};
     let xe1 = XEmpty1 {};
 
-    // Rejected by parser as yet
-    // match e1 {
-    //     Empty1() => () // ERROR unresolved enum variant, struct or const `Empty1`
-    // }
-    // match xe1 {
-    //     XEmpty1() => () // ERROR unresolved enum variant, struct or const `XEmpty1`
-    // }
     match e1 {
-        Empty1(..) => () //~ ERROR unresolved enum variant, struct or const `Empty1`
+        Empty1() => () //~ ERROR expected tuple struct/variant, found struct `Empty1`
     }
     match xe1 {
-        XEmpty1(..) => () //~ ERROR unresolved enum variant, struct or const `XEmpty1`
+        XEmpty1() => () //~ ERROR expected tuple struct/variant, found struct `XEmpty1`
+    }
+    match e1 {
+        Empty1(..) => () //~ ERROR expected tuple struct/variant, found struct `Empty1`
+    }
+    match xe1 {
+        XEmpty1(..) => () //~ ERROR expected tuple struct/variant, found struct `XEmpty1`
     }
 }

@@ -18,12 +18,12 @@ struct S;
 fn main() {
     match Foo::Baz {
         Foo::Bar => {}
-        //~^ ERROR this pattern has 0 fields, but the corresponding variant
+        //~^ ERROR expected unit struct/variant or constant, found tuple variant `Foo::Bar`
         _ => {}
     }
 
     match S {
         S(()) => {}
-        //~^ ERROR this pattern has 1 field, but the corresponding struct
+        //~^ ERROR expected tuple struct/variant, found unit struct `S`
     }
 }

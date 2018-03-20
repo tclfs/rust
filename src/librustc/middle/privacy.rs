@@ -12,30 +12,30 @@
 //! outside their scopes. This pass will also generate a set of exported items
 //! which are available for use externally when compiled as a library.
 
-use util::nodemap::{DefIdSet, FnvHashMap};
+use util::nodemap::{DefIdSet, FxHashMap};
 
 use std::hash::Hash;
+use std::fmt;
 use syntax::ast::NodeId;
 
 // Accessibility levels, sorted in ascending order
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AccessLevel {
     // Exported items + items participating in various kinds of public interfaces,
     // but not directly nameable. For example, if function `fn f() -> T {...}` is
-    // public, then type `T` is exported. Its values can be obtained by other crates
-    // even if the type itseld is not nameable.
-    // FIXME: Mostly unimplemented. Only `type` aliases export items currently.
+    // public, then type `T` is reachable. Its values can be obtained by other crates
+    // even if the type itself is not nameable.
     Reachable,
-    // Public items + items accessible to other crates with help of `pub use` reexports
+    // Public items + items accessible to other crates with help of `pub use` re-exports
     Exported,
-    // Items accessible to other crates directly, without help of reexports
+    // Items accessible to other crates directly, without help of re-exports
     Public,
 }
 
 // Accessibility levels for reachable HIR nodes
 #[derive(Clone)]
 pub struct AccessLevels<Id = NodeId> {
-    pub map: FnvHashMap<Id, AccessLevel>
+    pub map: FxHashMap<Id, AccessLevel>
 }
 
 impl<Id: Hash + Eq> AccessLevels<Id> {
@@ -53,6 +53,12 @@ impl<Id: Hash + Eq> AccessLevels<Id> {
 impl<Id: Hash + Eq> Default for AccessLevels<Id> {
     fn default() -> Self {
         AccessLevels { map: Default::default() }
+    }
+}
+
+impl<Id: Hash + Eq + fmt::Debug> fmt::Debug for AccessLevels<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.map, f)
     }
 }
 

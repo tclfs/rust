@@ -11,7 +11,7 @@
 // Test that when a trait impl changes, fns whose body uses that trait
 // must also be recompiled.
 
-// compile-flags: -Z incr-comp
+// compile-flags: -Z query-dep-graph
 
 #![feature(rustc_attrs)]
 #![allow(warnings)]
@@ -35,8 +35,7 @@ mod x {
 mod y {
     use Foo;
 
-    #[rustc_then_this_would_need(TypeckItemBody)] //~ ERROR OK
-    #[rustc_then_this_would_need(TransCrateItem)] //~ ERROR OK
+    #[rustc_then_this_would_need(TypeckTables)] //~ ERROR OK
     pub fn use_char_assoc() {
         // Careful here: in the representation, <char as Foo>::T gets
         // normalized away, so at a certain point we had no edge to

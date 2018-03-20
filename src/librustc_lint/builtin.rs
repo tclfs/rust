@@ -28,27 +28,27 @@
 //! Use the former for unit-like structs and the latter for structs with
 //! a `pub fn new()`.
 
-use middle::{cfg, infer, stability, traits};
-use middle::def::Def;
-use middle::cstore::CrateStore;
-use middle::def_id::DefId;
-use middle::subst::Substs;
-use middle::ty::{self, Ty, TyCtxt};
-use middle::ty::adjustment;
-use middle::traits::ProjectionMode;
-use rustc::front::map as hir_map;
-use util::nodemap::{NodeSet};
-use lint::{Level, LateContext, LintContext, LintArray, Lint};
-use lint::{LintPass, LateLintPass};
+use rustc::hir::def::Def;
+use rustc::hir::def_id::DefId;
+use rustc::cfg;
+use rustc::ty::subst::Substs;
+use rustc::ty::{self, Ty};
+use rustc::traits;
+use rustc::hir::map as hir_map;
+use util::nodemap::NodeSet;
+use lint::{LateContext, LintContext, LintArray};
+use lint::{LintPass, LateLintPass, EarlyLintPass, EarlyContext};
 
 use std::collections::HashSet;
 
-use syntax::{ast};
-use syntax::attr::{self, AttrMetaMethods};
-use syntax::codemap::{self, Span};
+use syntax::ast;
+use syntax::attr;
+use syntax::feature_gate::{AttributeGate, AttributeType, Stability, deprecated_attributes};
+use syntax_pos::{BytePos, Span, SyntaxContext};
+use syntax::symbol::keywords;
 
-use rustc_front::hir::{self, PatKind};
-use rustc_front::intravisit::FnKind;
+use rustc::hir::{self, PatKind};
+use rustc::hir::intravisit::FnKind;
 
 use bad_style::{MethodLateContext, method_context};
 
@@ -70,13 +70,18 @@ impl LintPass for WhileTrue {
     }
 }
 
-impl LateLintPass for WhileTrue {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for WhileTrue {
     fn check_expr(&mut self, cx: &LateContext, e: &hir::Expr) {
-        if let hir::ExprWhile(ref cond, _, _) = e.node {
+        if let hir::ExprWhile(ref cond, ..) = e.node {
             if let hir::ExprLit(ref lit) = cond.node {
                 if let ast::LitKind::Bool(true) = lit.node {
-                    cx.span_lint(WHILE_TRUE, e.span,
-                                 "denote infinite loops with loop { ... }");
+                    if lit.span.ctxt() == SyntaxContext::empty() {
+                        let msg = "denote infinite loops with `loop { ... }`";
+                        let condition_span = cx.tcx.sess.codemap().def_span(e.span);
+                        let mut err = cx.struct_span_lint(WHILE_TRUE, condition_span, msg);
+                        err.span_suggestion_short(condition_span, "use `loop`", "loop".to_owned());
+                        err.emit();
+                    }
                 }
             }
         }
@@ -93,10 +98,9 @@ declare_lint! {
 pub struct BoxPointers;
 
 impl BoxPointers {
-    fn check_heap_type<'a, 'tcx>(&self, cx: &LateContext<'a, 'tcx>,
-                                 span: Span, ty: Ty<'tcx>) {
+    fn check_heap_type<'a, 'tcx>(&self, cx: &LateContext, span: Span, ty: Ty) {
         for leaf_ty in ty.walk() {
-            if let ty::TyBox(_) = leaf_ty.sty {
+            if leaf_ty.is_box() {
                 let m = format!("type uses owned (Box type) pointers: {}", ty);
                 cx.span_lint(BOX_POINTERS, span, &m);
             }
@@ -110,32 +114,36 @@ impl LintPass for BoxPointers {
     }
 }
 
-impl LateLintPass for BoxPointers {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for BoxPointers {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         match it.node {
             hir::ItemFn(..) |
             hir::ItemTy(..) |
             hir::ItemEnum(..) |
-            hir::ItemStruct(..) =>
-                self.check_heap_type(cx, it.span,
-                                     cx.tcx.node_id_to_type(it.id)),
+            hir::ItemStruct(..) |
+            hir::ItemUnion(..) => {
+                let def_id = cx.tcx.hir.local_def_id(it.id);
+                self.check_heap_type(cx, it.span, cx.tcx.type_of(def_id))
+            }
             _ => ()
         }
 
         // If it's a struct, we also have to check the fields' types
         match it.node {
-            hir::ItemStruct(ref struct_def, _) => {
+            hir::ItemStruct(ref struct_def, _) |
+            hir::ItemUnion(ref struct_def, _) => {
                 for struct_field in struct_def.fields() {
+                    let def_id = cx.tcx.hir.local_def_id(struct_field.id);
                     self.check_heap_type(cx, struct_field.span,
-                                         cx.tcx.node_id_to_type(struct_field.id));
+                                         cx.tcx.type_of(def_id));
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
 
     fn check_expr(&mut self, cx: &LateContext, e: &hir::Expr) {
-        let ty = cx.tcx.node_id_to_type(e.id);
+        let ty = cx.tables.node_id_to_type(e.hir_id);
         self.check_heap_type(cx, e.span, ty);
     }
 }
@@ -143,7 +151,7 @@ impl LateLintPass for BoxPointers {
 declare_lint! {
     NON_SHORTHAND_FIELD_PATTERNS,
     Warn,
-    "using `Struct { x: x }` instead of `Struct { x }`"
+    "using `Struct { x: x }` instead of `Struct { x }` in a pattern"
 }
 
 #[derive(Copy, Clone)]
@@ -155,27 +163,24 @@ impl LintPass for NonShorthandFieldPatterns {
     }
 }
 
-impl LateLintPass for NonShorthandFieldPatterns {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonShorthandFieldPatterns {
     fn check_pat(&mut self, cx: &LateContext, pat: &hir::Pat) {
-        let def_map = cx.tcx.def_map.borrow();
-        if let PatKind::Struct(_, ref v, _) = pat.node {
-            let field_pats = v.iter().filter(|fieldpat| {
-                if fieldpat.node.is_shorthand {
-                    return false;
-                }
-                let def = def_map.get(&fieldpat.node.pat.id).map(|d| d.full_def());
-                if let Some(def_id) = cx.tcx.map.opt_local_def_id(fieldpat.node.pat.id) {
-                    def == Some(Def::Local(def_id, fieldpat.node.pat.id))
-                } else {
-                    false
-                }
-            });
+        if let PatKind::Struct(_, ref field_pats, _) = pat.node {
             for fieldpat in field_pats {
-                if let PatKind::Ident(_, ident, None) = fieldpat.node.pat.node {
-                    if ident.node.unhygienic_name == fieldpat.node.name {
-                        cx.span_lint(NON_SHORTHAND_FIELD_PATTERNS, fieldpat.span,
-                                     &format!("the `{}:` in this pattern is redundant and can \
-                                              be removed", ident.node))
+                if fieldpat.node.is_shorthand {
+                    continue;
+                }
+                if let PatKind::Binding(_, _, ident, None) = fieldpat.node.pat.node {
+                    if ident.node == fieldpat.node.name {
+                        let mut err = cx.struct_span_lint(NON_SHORTHAND_FIELD_PATTERNS,
+                                     fieldpat.span,
+                                     &format!("the `{}:` in this pattern is redundant",
+                                              ident.node));
+                        let subspan = cx.tcx.sess.codemap().span_through_char(fieldpat.span, ':');
+                        err.span_suggestion_short(subspan,
+                                                  "remove this",
+                                                  format!("{}", ident.node));
+                        err.emit();
                     }
                 }
             }
@@ -198,49 +203,67 @@ impl LintPass for UnsafeCode {
     }
 }
 
-impl LateLintPass for UnsafeCode {
+impl UnsafeCode {
+    fn report_unsafe(&self, cx: &LateContext, span: Span, desc: &'static str) {
+        // This comes from a macro that has #[allow_internal_unsafe].
+        if span.allows_unsafe() {
+            return;
+        }
+
+        cx.span_lint(UNSAFE_CODE, span, desc);
+    }
+}
+
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnsafeCode {
     fn check_expr(&mut self, cx: &LateContext, e: &hir::Expr) {
         if let hir::ExprBlock(ref blk) = e.node {
             // Don't warn about generated blocks, that'll just pollute the output.
             if blk.rules == hir::UnsafeBlock(hir::UserProvided) {
-                cx.span_lint(UNSAFE_CODE, blk.span, "usage of an `unsafe` block");
+                self.report_unsafe(cx, blk.span, "usage of an `unsafe` block");
             }
         }
     }
 
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         match it.node {
-            hir::ItemTrait(hir::Unsafety::Unsafe, _, _, _) =>
-                cx.span_lint(UNSAFE_CODE, it.span, "declaration of an `unsafe` trait"),
+            hir::ItemTrait(_, hir::Unsafety::Unsafe, ..) => {
+                self.report_unsafe(cx, it.span, "declaration of an `unsafe` trait")
+            }
 
-            hir::ItemImpl(hir::Unsafety::Unsafe, _, _, _, _, _) =>
-                cx.span_lint(UNSAFE_CODE, it.span, "implementation of an `unsafe` trait"),
+            hir::ItemImpl(hir::Unsafety::Unsafe, ..) => {
+                self.report_unsafe(cx, it.span, "implementation of an `unsafe` trait")
+            }
 
             _ => return,
         }
     }
 
-    fn check_fn(&mut self, cx: &LateContext, fk: FnKind, _: &hir::FnDecl,
-                _: &hir::Block, span: Span, _: ast::NodeId) {
+    fn check_fn(&mut self,
+                cx: &LateContext,
+                fk: FnKind<'tcx>,
+                _: &hir::FnDecl,
+                _: &hir::Body,
+                span: Span,
+                _: ast::NodeId) {
         match fk {
-            FnKind::ItemFn(_, _, hir::Unsafety::Unsafe, _, _, _) =>
-                cx.span_lint(UNSAFE_CODE, span, "declaration of an `unsafe` function"),
+            FnKind::ItemFn(_, _, hir::Unsafety::Unsafe, ..) => {
+                self.report_unsafe(cx, span, "declaration of an `unsafe` function")
+            }
 
-            FnKind::Method(_, sig, _) => {
+            FnKind::Method(_, sig, ..) => {
                 if sig.unsafety == hir::Unsafety::Unsafe {
-                    cx.span_lint(UNSAFE_CODE, span, "implementation of an `unsafe` method")
+                    self.report_unsafe(cx, span, "implementation of an `unsafe` method")
                 }
-            },
+            }
 
             _ => (),
         }
     }
 
-    fn check_trait_item(&mut self, cx: &LateContext, trait_item: &hir::TraitItem) {
-        if let hir::MethodTraitItem(ref sig, None) = trait_item.node {
+    fn check_trait_item(&mut self, cx: &LateContext, item: &hir::TraitItem) {
+        if let hir::TraitItemKind::Method(ref sig, hir::TraitMethod::Required(_)) = item.node {
             if sig.unsafety == hir::Unsafety::Unsafe {
-                cx.span_lint(UNSAFE_CODE, trait_item.span,
-                             "declaration of an `unsafe` method")
+                self.report_unsafe(cx, item.span, "declaration of an `unsafe` method")
             }
         }
     }
@@ -253,12 +276,6 @@ declare_lint! {
 }
 
 pub struct MissingDoc {
-    /// Stack of IDs of struct definitions.
-    struct_def_stack: Vec<ast::NodeId>,
-
-    /// True if inside variant definition
-    in_variant: bool,
-
     /// Stack of whether #[doc(hidden)] is set
     /// at each level which has lint attributes.
     doc_hidden_stack: Vec<bool>,
@@ -270,9 +287,7 @@ pub struct MissingDoc {
 impl MissingDoc {
     pub fn new() -> MissingDoc {
         MissingDoc {
-            struct_def_stack: vec!(),
-            in_variant: false,
-            doc_hidden_stack: vec!(false),
+            doc_hidden_stack: vec![false],
             private_traits: HashSet::new(),
         }
     }
@@ -282,11 +297,11 @@ impl MissingDoc {
     }
 
     fn check_missing_docs_attrs(&self,
-                               cx: &LateContext,
-                               id: Option<ast::NodeId>,
-                               attrs: &[ast::Attribute],
-                               sp: Span,
-                               desc: &'static str) {
+                                cx: &LateContext,
+                                id: Option<ast::NodeId>,
+                                attrs: &[ast::Attribute],
+                                sp: Span,
+                                desc: &'static str) {
         // If we're building a test harness, then warning about
         // documentation is probably not really relevant right now.
         if cx.sess().opts.test {
@@ -307,14 +322,30 @@ impl MissingDoc {
             }
         }
 
-        let has_doc = attrs.iter().any(|a| {
-            match a.node.value.node {
-                ast::MetaItemKind::NameValue(ref name, _) if *name == "doc" => true,
-                _ => false
+        fn has_doc(attr: &ast::Attribute) -> bool {
+            if !attr.check_name("doc") {
+                return false;
             }
-        });
+
+            if attr.is_value_str() {
+                return true;
+            }
+
+            if let Some(list) = attr.meta_item_list() {
+                for meta in list {
+                    if meta.check_name("include") {
+                        return true;
+                    }
+                }
+            }
+
+            false
+        }
+
+        let has_doc = attrs.iter().any(|a| has_doc(a));
         if !has_doc {
-            cx.span_lint(MISSING_DOCS, sp,
+            cx.span_lint(MISSING_DOCS,
+                         cx.tcx.sess.codemap().def_span(sp),
                          &format!("missing documentation for {}", desc));
         }
     }
@@ -326,30 +357,21 @@ impl LintPass for MissingDoc {
     }
 }
 
-impl LateLintPass for MissingDoc {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingDoc {
     fn enter_lint_attrs(&mut self, _: &LateContext, attrs: &[ast::Attribute]) {
-        let doc_hidden = self.doc_hidden() || attrs.iter().any(|attr| {
-            attr.check_name("doc") && match attr.meta_item_list() {
+        let doc_hidden = self.doc_hidden() ||
+                         attrs.iter().any(|attr| {
+            attr.check_name("doc") &&
+            match attr.meta_item_list() {
                 None => false,
-                Some(l) => attr::contains_name(&l[..], "hidden"),
+                Some(l) => attr::list_contains_name(&l, "hidden"),
             }
         });
         self.doc_hidden_stack.push(doc_hidden);
     }
 
-    fn exit_lint_attrs(&mut self, _: &LateContext, _: &[ast::Attribute]) {
+    fn exit_lint_attrs(&mut self, _: &LateContext, _attrs: &[ast::Attribute]) {
         self.doc_hidden_stack.pop().expect("empty doc_hidden_stack");
-    }
-
-    fn check_struct_def(&mut self, _: &LateContext, _: &hir::VariantData,
-                        _: ast::Name, _: &hir::Generics, item_id: ast::NodeId) {
-        self.struct_def_stack.push(item_id);
-    }
-
-    fn check_struct_def_post(&mut self, _: &LateContext, _: &hir::VariantData,
-                             _: ast::Name, _: &hir::Generics, item_id: ast::NodeId) {
-        let popped = self.struct_def_stack.pop().expect("empty struct_def_stack");
-        assert!(popped == item_id);
     }
 
     fn check_crate(&mut self, cx: &LateContext, krate: &hir::Crate) {
@@ -362,59 +384,66 @@ impl LateLintPass for MissingDoc {
             hir::ItemMod(..) => "a module",
             hir::ItemEnum(..) => "an enum",
             hir::ItemStruct(..) => "a struct",
-            hir::ItemTrait(_, _, _, ref items) => {
+            hir::ItemUnion(..) => "a union",
+            hir::ItemTrait(.., ref trait_item_refs) => {
                 // Issue #11592, traits are always considered exported, even when private.
                 if it.vis == hir::Visibility::Inherited {
                     self.private_traits.insert(it.id);
-                    for itm in items {
-                        self.private_traits.insert(itm.id);
+                    for trait_item_ref in trait_item_refs {
+                        self.private_traits.insert(trait_item_ref.id.node_id);
                     }
-                    return
+                    return;
                 }
                 "a trait"
-            },
+            }
             hir::ItemTy(..) => "a type alias",
-            hir::ItemImpl(_, _, _, Some(ref trait_ref), _, ref impl_items) => {
+            hir::ItemImpl(.., Some(ref trait_ref), _, ref impl_item_refs) => {
                 // If the trait is private, add the impl items to private_traits so they don't get
                 // reported for missing docs.
-                let real_trait = cx.tcx.trait_ref_to_def_id(trait_ref);
-                if let Some(node_id) = cx.tcx.map.as_local_node_id(real_trait) {
-                    match cx.tcx.map.find(node_id) {
-                        Some(hir_map::NodeItem(item)) => if item.vis == hir::Visibility::Inherited {
-                            for itm in impl_items {
-                                self.private_traits.insert(itm.id);
+                let real_trait = trait_ref.path.def.def_id();
+                if let Some(node_id) = cx.tcx.hir.as_local_node_id(real_trait) {
+                    match cx.tcx.hir.find(node_id) {
+                        Some(hir_map::NodeItem(item)) => {
+                            if item.vis == hir::Visibility::Inherited {
+                                for impl_item_ref in impl_item_refs {
+                                    self.private_traits.insert(impl_item_ref.id.node_id);
+                                }
                             }
-                        },
-                        _ => { }
+                        }
+                        _ => {}
                     }
                 }
-                return
-            },
+                return;
+            }
             hir::ItemConst(..) => "a constant",
             hir::ItemStatic(..) => "a static",
-            _ => return
+            _ => return,
         };
 
         self.check_missing_docs_attrs(cx, Some(it.id), &it.attrs, it.span, desc);
     }
 
     fn check_trait_item(&mut self, cx: &LateContext, trait_item: &hir::TraitItem) {
-        if self.private_traits.contains(&trait_item.id) { return }
+        if self.private_traits.contains(&trait_item.id) {
+            return;
+        }
 
         let desc = match trait_item.node {
-            hir::ConstTraitItem(..) => "an associated constant",
-            hir::MethodTraitItem(..) => "a trait method",
-            hir::TypeTraitItem(..) => "an associated type",
+            hir::TraitItemKind::Const(..) => "an associated constant",
+            hir::TraitItemKind::Method(..) => "a trait method",
+            hir::TraitItemKind::Type(..) => "an associated type",
         };
 
-        self.check_missing_docs_attrs(cx, Some(trait_item.id),
+        self.check_missing_docs_attrs(cx,
+                                      Some(trait_item.id),
                                       &trait_item.attrs,
-                                      trait_item.span, desc);
+                                      trait_item.span,
+                                      desc);
     }
 
     fn check_impl_item(&mut self, cx: &LateContext, impl_item: &hir::ImplItem) {
         // If the method is an impl for a trait, don't doc.
-        if method_context(cx, impl_item.id, impl_item.span) == MethodLateContext::TraitImpl {
+        if method_context(cx, impl_item.id) == MethodLateContext::TraitImpl {
             return;
         }
 
@@ -423,33 +452,29 @@ impl LateLintPass for MissingDoc {
             hir::ImplItemKind::Method(..) => "a method",
             hir::ImplItemKind::Type(_) => "an associated type",
         };
-        self.check_missing_docs_attrs(cx, Some(impl_item.id),
+        self.check_missing_docs_attrs(cx,
+                                      Some(impl_item.id),
                                       &impl_item.attrs,
-                                      impl_item.span, desc);
+                                      impl_item.span,
+                                      desc);
     }
 
     fn check_struct_field(&mut self, cx: &LateContext, sf: &hir::StructField) {
         if !sf.is_positional() {
-            if sf.vis == hir::Public || self.in_variant {
-                let cur_struct_def = *self.struct_def_stack.last()
-                    .expect("empty struct_def_stack");
-                self.check_missing_docs_attrs(cx, Some(cur_struct_def),
-                                              &sf.attrs, sf.span,
-                                              "a struct field")
-            }
+            self.check_missing_docs_attrs(cx,
+                                          Some(sf.id),
+                                          &sf.attrs,
+                                          sf.span,
+                                          "a struct field")
         }
     }
 
     fn check_variant(&mut self, cx: &LateContext, v: &hir::Variant, _: &hir::Generics) {
-        self.check_missing_docs_attrs(cx, Some(v.node.data.id()),
-                                      &v.node.attrs, v.span, "a variant");
-        assert!(!self.in_variant);
-        self.in_variant = true;
-    }
-
-    fn check_variant_post(&mut self, _: &LateContext, _: &hir::Variant, _: &hir::Generics) {
-        assert!(self.in_variant);
-        self.in_variant = false;
+        self.check_missing_docs_attrs(cx,
+                                      Some(v.node.data.id()),
+                                      &v.node.attrs,
+                                      v.span,
+                                      "a variant");
     }
 }
 
@@ -468,38 +493,43 @@ impl LintPass for MissingCopyImplementations {
     }
 }
 
-impl LateLintPass for MissingCopyImplementations {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingCopyImplementations {
     fn check_item(&mut self, cx: &LateContext, item: &hir::Item) {
         if !cx.access_levels.is_reachable(item.id) {
             return;
         }
         let (def, ty) = match item.node {
             hir::ItemStruct(_, ref ast_generics) => {
-                if ast_generics.is_parameterized() {
+                if !ast_generics.params.is_empty() {
                     return;
                 }
-                let def = cx.tcx.lookup_adt_def(cx.tcx.map.local_def_id(item.id));
-                (def, cx.tcx.mk_struct(def,
-                                       cx.tcx.mk_substs(Substs::empty())))
+                let def = cx.tcx.adt_def(cx.tcx.hir.local_def_id(item.id));
+                (def, cx.tcx.mk_adt(def, cx.tcx.intern_substs(&[])))
+            }
+            hir::ItemUnion(_, ref ast_generics) => {
+                if !ast_generics.params.is_empty() {
+                    return;
+                }
+                let def = cx.tcx.adt_def(cx.tcx.hir.local_def_id(item.id));
+                (def, cx.tcx.mk_adt(def, cx.tcx.intern_substs(&[])))
             }
             hir::ItemEnum(_, ref ast_generics) => {
-                if ast_generics.is_parameterized() {
+                if !ast_generics.params.is_empty() {
                     return;
                 }
-                let def = cx.tcx.lookup_adt_def(cx.tcx.map.local_def_id(item.id));
-                (def, cx.tcx.mk_enum(def,
-                                     cx.tcx.mk_substs(Substs::empty())))
+                let def = cx.tcx.adt_def(cx.tcx.hir.local_def_id(item.id));
+                (def, cx.tcx.mk_adt(def, cx.tcx.intern_substs(&[])))
             }
             _ => return,
         };
-        if def.has_dtor() { return; }
-        let parameter_environment = cx.tcx.empty_parameter_environment();
-        // FIXME (@jroesch) should probably inver this so that the parameter env still impls this
-        // method
-        if !ty.moves_by_default(&parameter_environment, item.span) {
+        if def.has_dtor(cx.tcx) {
             return;
         }
-        if parameter_environment.can_type_implement_copy(ty, item.span).is_ok() {
+        let param_env = ty::ParamEnv::empty();
+        if !ty.moves_by_default(cx.tcx, param_env, item.span) {
+            return;
+        }
+        if param_env.can_type_implement_copy(cx.tcx, ty, item.span).is_ok() {
             cx.span_lint(MISSING_COPY_IMPLEMENTATIONS,
                          item.span,
                          "type could implement `Copy`; consider adding `impl \
@@ -520,9 +550,7 @@ pub struct MissingDebugImplementations {
 
 impl MissingDebugImplementations {
     pub fn new() -> MissingDebugImplementations {
-        MissingDebugImplementations {
-            impling_types: None,
-        }
+        MissingDebugImplementations { impling_types: None }
     }
 }
 
@@ -532,31 +560,30 @@ impl LintPass for MissingDebugImplementations {
     }
 }
 
-impl LateLintPass for MissingDebugImplementations {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingDebugImplementations {
     fn check_item(&mut self, cx: &LateContext, item: &hir::Item) {
         if !cx.access_levels.is_reachable(item.id) {
             return;
         }
 
         match item.node {
-            hir::ItemStruct(..) | hir::ItemEnum(..) => {},
+            hir::ItemStruct(..) |
+            hir::ItemUnion(..) |
+            hir::ItemEnum(..) => {}
             _ => return,
         }
 
-        let debug = match cx.tcx.lang_items.debug_trait() {
+        let debug = match cx.tcx.lang_items().debug_trait() {
             Some(debug) => debug,
             None => return,
         };
 
         if self.impling_types.is_none() {
-            let debug_def = cx.tcx.lookup_trait_def(debug);
             let mut impls = NodeSet();
-            debug_def.for_each_impl(cx.tcx, |d| {
-                if let Some(n) = cx.tcx.map.as_local_node_id(d) {
-                    if let Some(ty_def) = cx.tcx.node_id_to_type(n).ty_to_def_id() {
-                        if let Some(node_id) = cx.tcx.map.as_local_node_id(ty_def) {
-                            impls.insert(node_id);
-                        }
+            cx.tcx.for_each_impl(debug, |d| {
+                if let Some(ty_def) = cx.tcx.type_of(d).ty_to_def_id() {
+                    if let Some(node_id) = cx.tcx.hir.as_local_node_id(ty_def) {
+                        impls.insert(node_id);
                     }
                 }
             });
@@ -575,73 +602,123 @@ impl LateLintPass for MissingDebugImplementations {
 }
 
 declare_lint! {
-    DEPRECATED,
-    Warn,
-    "detects use of deprecated items"
+    pub ANONYMOUS_PARAMETERS,
+    Allow,
+    "detects anonymous parameters"
 }
 
-/// Checks for use of items with `#[deprecated]` or `#[rustc_deprecated]` attributes
-#[derive(Copy, Clone)]
-pub struct Deprecated;
+/// Checks for use of anonymous parameters (RFC 1685)
+#[derive(Clone)]
+pub struct AnonymousParameters;
 
-impl Deprecated {
-    fn lint(&self, cx: &LateContext, _id: DefId, span: Span,
-            stability: &Option<&attr::Stability>, deprecation: &Option<attr::Deprecation>) {
-        // Deprecated attributes apply in-crate and cross-crate.
-        if let Some(&attr::Stability{rustc_depr: Some(attr::RustcDeprecation{ref reason, ..}), ..})
-                = *stability {
-            output(cx, DEPRECATED, span, Some(&reason))
-        } else if let Some(attr::Deprecation{ref note, ..}) = *deprecation {
-            output(cx, DEPRECATED, span, note.as_ref().map(|x| &**x))
-        }
-
-        fn output(cx: &LateContext, lint: &'static Lint, span: Span, note: Option<&str>) {
-            let msg = if let Some(note) = note {
-                format!("use of deprecated item: {}", note)
-            } else {
-                format!("use of deprecated item")
-            };
-
-            cx.span_lint(lint, span, &msg);
-        }
-    }
-}
-
-impl LintPass for Deprecated {
+impl LintPass for AnonymousParameters {
     fn get_lints(&self) -> LintArray {
-        lint_array!(DEPRECATED)
+        lint_array!(ANONYMOUS_PARAMETERS)
     }
 }
 
-impl LateLintPass for Deprecated {
-    fn check_item(&mut self, cx: &LateContext, item: &hir::Item) {
-        stability::check_item(cx.tcx, item, false,
-                              &mut |id, sp, stab, depr|
-                                self.lint(cx, id, sp, &stab, &depr));
+impl EarlyLintPass for AnonymousParameters {
+    fn check_trait_item(&mut self, cx: &EarlyContext, it: &ast::TraitItem) {
+        match it.node {
+            ast::TraitItemKind::Method(ref sig, _) => {
+                for arg in sig.decl.inputs.iter() {
+                    match arg.pat.node {
+                        ast::PatKind::Ident(_, ident, None) => {
+                            if ident.node.name == keywords::Invalid.name() {
+                                cx.span_lint(ANONYMOUS_PARAMETERS,
+                                             arg.pat.span,
+                                             "use of deprecated anonymous parameter");
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+            },
+            _ => (),
+        }
+    }
+}
+
+/// Checks for use of attributes which have been deprecated.
+#[derive(Clone)]
+pub struct DeprecatedAttr {
+    // This is not free to compute, so we want to keep it around, rather than
+    // compute it for every attribute.
+    depr_attrs: Vec<&'static (&'static str, AttributeType, AttributeGate)>,
+}
+
+impl DeprecatedAttr {
+    pub fn new() -> DeprecatedAttr {
+        DeprecatedAttr {
+            depr_attrs: deprecated_attributes(),
+        }
+    }
+}
+
+impl LintPass for DeprecatedAttr {
+    fn get_lints(&self) -> LintArray {
+        lint_array!()
+    }
+}
+
+impl EarlyLintPass for DeprecatedAttr {
+    fn check_attribute(&mut self, cx: &EarlyContext, attr: &ast::Attribute) {
+        let name = unwrap_or!(attr.name(), return);
+        for &&(n, _, ref g) in &self.depr_attrs {
+            if name == n {
+                if let &AttributeGate::Gated(Stability::Deprecated(link),
+                                             ref name,
+                                             ref reason,
+                                             _) = g {
+                    let msg = format!("use of deprecated attribute `{}`: {}. See {}",
+                                      name, reason, link);
+                    let mut err = cx.struct_span_lint(DEPRECATED, attr.span, &msg);
+                    err.span_suggestion_short(attr.span, "remove this attribute", "".to_owned());
+                    err.emit();
+                }
+                return;
+            }
+        }
+    }
+}
+
+declare_lint! {
+    pub UNUSED_DOC_COMMENT,
+    Warn,
+    "detects doc comments that aren't used by rustdoc"
+}
+
+#[derive(Copy, Clone)]
+pub struct UnusedDocComment;
+
+impl LintPass for UnusedDocComment {
+    fn get_lints(&self) -> LintArray {
+        lint_array![UNUSED_DOC_COMMENT]
+    }
+}
+
+impl UnusedDocComment {
+    fn warn_if_doc<'a, 'tcx,
+                   I: Iterator<Item=&'a ast::Attribute>,
+                   C: LintContext<'tcx>>(&self, mut attrs: I, cx: &C) {
+        if let Some(attr) = attrs.find(|a| a.is_value_str() && a.check_name("doc")) {
+            cx.struct_span_lint(UNUSED_DOC_COMMENT, attr.span, "doc comment not used by rustdoc")
+              .emit();
+        }
+    }
+}
+
+impl EarlyLintPass for UnusedDocComment {
+    fn check_local(&mut self, cx: &EarlyContext, decl: &ast::Local) {
+        self.warn_if_doc(decl.attrs.iter(), cx);
     }
 
-    fn check_expr(&mut self, cx: &LateContext, e: &hir::Expr) {
-        stability::check_expr(cx.tcx, e,
-                              &mut |id, sp, stab, depr|
-                                self.lint(cx, id, sp, &stab, &depr));
+    fn check_arm(&mut self, cx: &EarlyContext, arm: &ast::Arm) {
+        self.warn_if_doc(arm.attrs.iter(), cx);
     }
 
-    fn check_path(&mut self, cx: &LateContext, path: &hir::Path, id: ast::NodeId) {
-        stability::check_path(cx.tcx, path, id,
-                              &mut |id, sp, stab, depr|
-                                self.lint(cx, id, sp, &stab, &depr));
-    }
-
-    fn check_path_list_item(&mut self, cx: &LateContext, item: &hir::PathListItem) {
-        stability::check_path_list_item(cx.tcx, item,
-                                         &mut |id, sp, stab, depr|
-                                           self.lint(cx, id, sp, &stab, &depr));
-    }
-
-    fn check_pat(&mut self, cx: &LateContext, pat: &hir::Pat) {
-        stability::check_pat(cx.tcx, pat,
-                             &mut |id, sp, stab, depr|
-                                self.lint(cx, id, sp, &stab, &depr));
+    fn check_expr(&mut self, cx: &EarlyContext, expr: &ast::Expr) {
+        self.warn_if_doc(expr.attrs.iter(), cx);
     }
 }
 
@@ -661,16 +738,21 @@ impl LintPass for UnconditionalRecursion {
     }
 }
 
-impl LateLintPass for UnconditionalRecursion {
-    fn check_fn(&mut self, cx: &LateContext, fn_kind: FnKind, _: &hir::FnDecl,
-                blk: &hir::Block, sp: Span, id: ast::NodeId) {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnconditionalRecursion {
+    fn check_fn(&mut self,
+                cx: &LateContext,
+                fn_kind: FnKind,
+                _: &hir::FnDecl,
+                body: &hir::Body,
+                sp: Span,
+                id: ast::NodeId) {
         let method = match fn_kind {
             FnKind::ItemFn(..) => None,
             FnKind::Method(..) => {
-                cx.tcx.impl_or_trait_item(cx.tcx.map.local_def_id(id)).as_opt_method()
+                Some(cx.tcx.associated_item(cx.tcx.hir.local_def_id(id)))
             }
             // closures can't recur, so they don't matter.
-            FnKind::Closure => return
+            FnKind::Closure(_) => return,
         };
 
         // Walk through this function (say `f`) looking to see if
@@ -699,7 +781,7 @@ impl LateLintPass for UnconditionalRecursion {
         // to have behaviour like the above, rather than
         // e.g. accidentally recurring after an assert.
 
-        let cfg = cfg::CFG::new(cx.tcx, blk);
+        let cfg = cfg::CFG::new(cx.tcx, &body);
 
         let mut work_queue = vec![cfg.entry];
         let mut reached_exit_without_self_call = false;
@@ -720,25 +802,25 @@ impl LateLintPass for UnconditionalRecursion {
             }
             visited.insert(cfg_id);
 
-            let node_id = cfg.graph.node_data(idx).id();
-
             // is this a recursive call?
-            let self_recursive = if node_id != ast::DUMMY_NODE_ID {
-                match method {
-                    Some(ref method) => {
-                        expr_refers_to_this_method(cx.tcx, method, node_id)
-                    }
-                    None => expr_refers_to_this_fn(cx.tcx, id, node_id)
+            let local_id = cfg.graph.node_data(idx).id();
+            if local_id != hir::DUMMY_ITEM_LOCAL_ID {
+                let node_id = cx.tcx.hir.hir_to_node_id(hir::HirId {
+                    owner: body.value.hir_id.owner,
+                    local_id
+                });
+                let self_recursive = match method {
+                    Some(ref method) => expr_refers_to_this_method(cx, method, node_id),
+                    None => expr_refers_to_this_fn(cx, id, node_id),
+                };
+                if self_recursive {
+                    self_call_spans.push(cx.tcx.hir.span(node_id));
+                    // this is a self call, so we shouldn't explore past
+                    // this node in the CFG.
+                    continue;
                 }
-            } else {
-                false
-            };
-            if self_recursive {
-                self_call_spans.push(cx.tcx.map.span(node_id));
-                // this is a self call, so we shouldn't explore past
-                // this node in the CFG.
-                continue;
             }
+
             // add the successors of this node to explore the graph further.
             for (_, edge) in cfg.graph.outgoing_edges(idx) {
                 let target_idx = edge.target();
@@ -754,18 +836,16 @@ impl LateLintPass for UnconditionalRecursion {
         // no break */ }`) shouldn't be linted unless it actually
         // recurs.
         if !reached_exit_without_self_call && !self_call_spans.is_empty() {
-            let mut db = cx.struct_span_lint(UNCONDITIONAL_RECURSION, sp,
+            let sp = cx.tcx.sess.codemap().def_span(sp);
+            let mut db = cx.struct_span_lint(UNCONDITIONAL_RECURSION,
+                                             sp,
                                              "function cannot return without recurring");
-
-            // FIXME #19668: these could be span_lint_note's instead of this manual guard.
-            if cx.current_level(UNCONDITIONAL_RECURSION) != Level::Allow {
-                // offer some help to the programmer.
-                for call in &self_call_spans {
-                    db.span_note(*call, "recursive call site");
-                }
-                db.fileline_help(sp, "a `loop` may express intention \
-                                      better if this is on purpose");
+            db.span_label(sp, "cannot return without recurring");
+            // offer some help to the programmer.
+            for call in &self_call_spans {
+                db.span_label(*call, "recursive call site");
             }
+            db.help("a `loop` may express intention better if this is on purpose");
             db.emit();
         }
 
@@ -775,132 +855,134 @@ impl LateLintPass for UnconditionalRecursion {
         // Functions for identifying if the given Expr NodeId `id`
         // represents a call to the function `fn_id`/method `method`.
 
-        fn expr_refers_to_this_fn(tcx: &TyCtxt,
-                                  fn_id: ast::NodeId,
-                                  id: ast::NodeId) -> bool {
-            match tcx.map.get(id) {
+        fn expr_refers_to_this_fn(cx: &LateContext, fn_id: ast::NodeId, id: ast::NodeId) -> bool {
+            match cx.tcx.hir.get(id) {
                 hir_map::NodeExpr(&hir::Expr { node: hir::ExprCall(ref callee, _), .. }) => {
-                    tcx.def_map
-                       .borrow()
-                       .get(&callee.id)
-                       .map_or(false,
-                               |def| def.def_id() == tcx.map.local_def_id(fn_id))
+                    let def = if let hir::ExprPath(ref qpath) = callee.node {
+                        cx.tables.qpath_def(qpath, callee.hir_id)
+                    } else {
+                        return false;
+                    };
+                    match def {
+                        Def::Local(..) | Def::Upvar(..) => false,
+                        _ => def.def_id() == cx.tcx.hir.local_def_id(fn_id)
+                    }
                 }
-                _ => false
+                _ => false,
             }
         }
 
         // Check if the expression `id` performs a call to `method`.
-        fn expr_refers_to_this_method(tcx: &TyCtxt,
-                                      method: &ty::Method,
-                                      id: ast::NodeId) -> bool {
+        fn expr_refers_to_this_method(cx: &LateContext,
+                                      method: &ty::AssociatedItem,
+                                      id: ast::NodeId)
+                                      -> bool {
+            use rustc::ty::adjustment::*;
+
+            // Ignore non-expressions.
+            let expr = if let hir_map::NodeExpr(e) = cx.tcx.hir.get(id) {
+                e
+            } else {
+                return false;
+            };
+
+            // Check for overloaded autoderef method calls.
+            let mut source = cx.tables.expr_ty(expr);
+            for adjustment in cx.tables.expr_adjustments(expr) {
+                if let Adjust::Deref(Some(deref)) = adjustment.kind {
+                    let (def_id, substs) = deref.method_call(cx.tcx, source);
+                    if method_call_refers_to_method(cx, method, def_id, substs, id) {
+                        return true;
+                    }
+                }
+                source = adjustment.target;
+            }
+
             // Check for method calls and overloaded operators.
-            let opt_m = tcx.tables.borrow().method_map.get(&ty::MethodCall::expr(id)).cloned();
-            if let Some(m) = opt_m {
-                if method_call_refers_to_method(tcx, method, m.def_id, m.substs, id) {
+            if cx.tables.is_method_call(expr) {
+                let hir_id = cx.tcx.hir.definitions().node_to_hir_id(id);
+                let def_id = cx.tables.type_dependent_defs()[hir_id].def_id();
+                let substs = cx.tables.node_substs(hir_id);
+                if method_call_refers_to_method(cx, method, def_id, substs, id) {
                     return true;
                 }
             }
 
-            // Check for overloaded autoderef method calls.
-            let opt_adj = tcx.tables.borrow().adjustments.get(&id).cloned();
-            if let Some(adjustment::AdjustDerefRef(adj)) = opt_adj {
-                for i in 0..adj.autoderefs {
-                    let method_call = ty::MethodCall::autoderef(id, i as u32);
-                    if let Some(m) = tcx.tables.borrow().method_map
-                                                        .get(&method_call)
-                                                        .cloned() {
-                        if method_call_refers_to_method(tcx, method, m.def_id, m.substs, id) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
             // Check for calls to methods via explicit paths (e.g. `T::method()`).
-            match tcx.map.get(id) {
-                hir_map::NodeExpr(&hir::Expr { node: hir::ExprCall(ref callee, _), .. }) => {
-                    match tcx.def_map.borrow().get(&callee.id).map(|d| d.full_def()) {
-                        Some(Def::Method(def_id)) => {
-                            let item_substs =
-                                tcx.tables.borrow().item_substs
-                                                   .get(&callee.id)
-                                                   .cloned()
-                                                   .unwrap_or_else(|| ty::ItemSubsts::empty());
-                            method_call_refers_to_method(
-                                tcx, method, def_id, &item_substs.substs, id)
+            match expr.node {
+                hir::ExprCall(ref callee, _) => {
+                    let def = if let hir::ExprPath(ref qpath) = callee.node {
+                        cx.tables.qpath_def(qpath, callee.hir_id)
+                    } else {
+                        return false;
+                    };
+                    match def {
+                        Def::Method(def_id) => {
+                            let substs = cx.tables.node_substs(callee.hir_id);
+                            method_call_refers_to_method(cx, method, def_id, substs, id)
                         }
-                        _ => false
+                        _ => false,
                     }
                 }
-                _ => false
+                _ => false,
             }
         }
 
         // Check if the method call to the method with the ID `callee_id`
         // and instantiated with `callee_substs` refers to method `method`.
-        fn method_call_refers_to_method<'tcx>(tcx: &TyCtxt<'tcx>,
-                                              method: &ty::Method,
-                                              callee_id: DefId,
-                                              callee_substs: &Substs<'tcx>,
-                                              expr_id: ast::NodeId) -> bool {
-            let callee_item = tcx.impl_or_trait_item(callee_id);
+        fn method_call_refers_to_method<'a, 'tcx>(cx: &LateContext<'a, 'tcx>,
+                                                  method: &ty::AssociatedItem,
+                                                  callee_id: DefId,
+                                                  callee_substs: &Substs<'tcx>,
+                                                  expr_id: ast::NodeId)
+                                                  -> bool {
+            let tcx = cx.tcx;
+            let callee_item = tcx.associated_item(callee_id);
 
-            match callee_item.container() {
+            match callee_item.container {
                 // This is an inherent method, so the `def_id` refers
                 // directly to the method definition.
-                ty::ImplContainer(_) => {
-                    callee_id == method.def_id
-                }
+                ty::ImplContainer(_) => callee_id == method.def_id,
 
                 // A trait method, from any number of possible sources.
                 // Attempt to select a concrete impl before checking.
                 ty::TraitContainer(trait_def_id) => {
-                    let trait_ref = callee_substs.to_trait_ref(tcx, trait_def_id);
+                    let trait_ref = ty::TraitRef::from_method(tcx, trait_def_id, callee_substs);
                     let trait_ref = ty::Binder(trait_ref);
-                    let span = tcx.map.span(expr_id);
+                    let span = tcx.hir.span(expr_id);
                     let obligation =
                         traits::Obligation::new(traits::ObligationCause::misc(span, expr_id),
+                                                cx.param_env,
                                                 trait_ref.to_poly_trait_predicate());
 
-                    // unwrap() is ok here b/c `method` is the method
-                    // defined in this crate whose body we are
-                    // checking, so it's always local
-                    let node_id = tcx.map.as_local_node_id(method.def_id).unwrap();
+                    tcx.infer_ctxt().enter(|infcx| {
+                        let mut selcx = traits::SelectionContext::new(&infcx);
+                        match selcx.select(&obligation) {
+                            // The method comes from a `T: Trait` bound.
+                            // If `T` is `Self`, then this call is inside
+                            // a default method definition.
+                            Ok(Some(traits::VtableParam(_))) => {
+                                let on_self = trait_ref.self_ty().is_self();
+                                // We can only be recurring in a default
+                                // method if we're being called literally
+                                // on the `Self` type.
+                                on_self && callee_id == method.def_id
+                            }
 
-                    let param_env = ty::ParameterEnvironment::for_item(tcx, node_id);
-                    let infcx = infer::new_infer_ctxt(tcx,
-                                                      &tcx.tables,
-                                                      Some(param_env),
-                                                      ProjectionMode::AnyFinal);
-                    let mut selcx = traits::SelectionContext::new(&infcx);
-                    match selcx.select(&obligation) {
-                        // The method comes from a `T: Trait` bound.
-                        // If `T` is `Self`, then this call is inside
-                        // a default method definition.
-                        Ok(Some(traits::VtableParam(_))) => {
-                            let self_ty = callee_substs.self_ty();
-                            let on_self = self_ty.map_or(false, |t| t.is_self());
-                            // We can only be recurring in a default
-                            // method if we're being called literally
-                            // on the `Self` type.
-                            on_self && callee_id == method.def_id
+                            // The `impl` is known, so we check that with a
+                            // special case:
+                            Ok(Some(traits::VtableImpl(vtable_impl))) => {
+                                let container = ty::ImplContainer(vtable_impl.impl_def_id);
+                                // It matches if it comes from the same impl,
+                                // and has the same method name.
+                                container == method.container && callee_item.name == method.name
+                            }
+
+                            // There's no way to know if this call is
+                            // recursive, so we assume it's not.
+                            _ => false,
                         }
-
-                        // The `impl` is known, so we check that with a
-                        // special case:
-                        Ok(Some(traits::VtableImpl(vtable_impl))) => {
-                            let container = ty::ImplContainer(vtable_impl.impl_def_id);
-                            // It matches if it comes from the same impl,
-                            // and has the same method name.
-                            container == method.container
-                                && callee_item.name() == method.name
-                        }
-
-                        // There's no way to know if this call is
-                        // recursive, so we assume it's not.
-                        _ => return false
-                    }
+                    })
                 }
             }
         }
@@ -922,7 +1004,7 @@ impl LintPass for PluginAsLibrary {
     }
 }
 
-impl LateLintPass for PluginAsLibrary {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for PluginAsLibrary {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         if cx.sess().plugin_registrar_fn.get().is_some() {
             // We're compiling a plugin; it's fine to link other plugins.
@@ -934,8 +1016,9 @@ impl LateLintPass for PluginAsLibrary {
             _ => return,
         };
 
-        let prfn = match cx.sess().cstore.extern_mod_stmt_cnum(it.id) {
-            Some(cnum) => cx.sess().cstore.plugin_registrar_fn(cnum),
+        let def_id = cx.tcx.hir.local_def_id(it.id);
+        let prfn = match cx.tcx.extern_mod_stmt_cnum(def_id) {
+            Some(cnum) => cx.tcx.plugin_registrar_fn(cnum),
             None => {
                 // Probably means we aren't linking the crate for some reason.
                 //
@@ -945,7 +1028,8 @@ impl LateLintPass for PluginAsLibrary {
         };
 
         if prfn.is_some() {
-            cx.span_lint(PLUGIN_AS_LIBRARY, it.span,
+            cx.span_lint(PLUGIN_AS_LIBRARY,
+                         it.span,
                          "compiler plugin used as an ordinary library");
         }
     }
@@ -987,41 +1071,71 @@ impl LintPass for InvalidNoMangleItems {
     }
 }
 
-impl LateLintPass for InvalidNoMangleItems {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         match it.node {
-            hir::ItemFn(_, _, _, _, ref generics, _) => {
-                if attr::contains_name(&it.attrs, "no_mangle") {
-                    if !cx.access_levels.is_reachable(it.id) {
-                        let msg = format!("function {} is marked #[no_mangle], but not exported",
-                                          it.name);
-                        cx.span_lint(PRIVATE_NO_MANGLE_FNS, it.span, &msg);
+            hir::ItemFn(.., ref generics, _) => {
+                if let Some(no_mangle_attr) = attr::find_by_name(&it.attrs, "no_mangle") {
+                    if attr::contains_name(&it.attrs, "linkage") {
+                        return;
                     }
-                    if generics.is_parameterized() {
-                        cx.span_lint(NO_MANGLE_GENERIC_ITEMS,
-                                     it.span,
-                                     "generic functions must be mangled");
+                    if !cx.access_levels.is_reachable(it.id) {
+                        let msg = "function is marked #[no_mangle], but not exported";
+                        let mut err = cx.struct_span_lint(PRIVATE_NO_MANGLE_FNS, it.span, msg);
+                        let insertion_span = it.span.shrink_to_lo();
+                        if it.vis == hir::Visibility::Inherited {
+                            err.span_suggestion(insertion_span,
+                                                "try making it public",
+                                                "pub ".to_owned());
+                        }
+                        err.emit();
+                    }
+                    if generics.is_type_parameterized() {
+                        let mut err = cx.struct_span_lint(NO_MANGLE_GENERIC_ITEMS,
+                                                          it.span,
+                                                          "functions generic over \
+                                                           types must be mangled");
+                        err.span_suggestion_short(no_mangle_attr.span,
+                                                  "remove this attribute",
+                                                  "".to_owned());
+                        err.emit();
                     }
                 }
-            },
+            }
             hir::ItemStatic(..) => {
                 if attr::contains_name(&it.attrs, "no_mangle") &&
-                       !cx.access_levels.is_reachable(it.id) {
-                    let msg = format!("static {} is marked #[no_mangle], but not exported",
-                                      it.name);
-                    cx.span_lint(PRIVATE_NO_MANGLE_STATICS, it.span, &msg);
+                   !cx.access_levels.is_reachable(it.id) {
+                       let msg = "static is marked #[no_mangle], but not exported";
+                       let mut err = cx.struct_span_lint(PRIVATE_NO_MANGLE_STATICS, it.span, msg);
+                       let insertion_span = it.span.shrink_to_lo();
+                       if it.vis == hir::Visibility::Inherited {
+                           err.span_suggestion(insertion_span,
+                                               "try making it public",
+                                               "pub ".to_owned());
+                       }
+                       err.emit();
                 }
-            },
+            }
             hir::ItemConst(..) => {
                 if attr::contains_name(&it.attrs, "no_mangle") {
                     // Const items do not refer to a particular location in memory, and therefore
                     // don't have anything to attach a symbol to
-                    let msg = "const items should never be #[no_mangle], consider instead using \
-                               `pub static`";
-                    cx.span_lint(NO_MANGLE_CONST_ITEMS, it.span, msg);
+                    let msg = "const items should never be #[no_mangle]";
+                    let mut err = cx.struct_span_lint(NO_MANGLE_CONST_ITEMS, it.span, msg);
+
+                    // account for "pub const" (#45562)
+                    let start = cx.tcx.sess.codemap().span_to_snippet(it.span)
+                        .map(|snippet| snippet.find("const").unwrap_or(0))
+                        .unwrap_or(0) as u32;
+                    // `const` is 5 chars
+                    let const_span = it.span.with_hi(BytePos(it.span.lo().0 + start + 5));
+                    err.span_suggestion(const_span,
+                                        "try a static value",
+                                        "pub static".to_owned());
+                    err.emit();
                 }
             }
-            _ => {},
+            _ => {}
         }
     }
 }
@@ -1041,55 +1155,46 @@ impl LintPass for MutableTransmutes {
     }
 }
 
-impl LateLintPass for MutableTransmutes {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MutableTransmutes {
     fn check_expr(&mut self, cx: &LateContext, expr: &hir::Expr) {
         use syntax::abi::Abi::RustIntrinsic;
 
-        let msg = "mutating transmuted &mut T from &T may cause undefined behavior,\
+        let msg = "mutating transmuted &mut T from &T may cause undefined behavior, \
                    consider instead using an UnsafeCell";
         match get_transmute_from_to(cx, expr) {
             Some((&ty::TyRef(_, from_mt), &ty::TyRef(_, to_mt))) => {
-                if to_mt.mutbl == hir::Mutability::MutMutable
-                    && from_mt.mutbl == hir::Mutability::MutImmutable {
+                if to_mt.mutbl == hir::Mutability::MutMutable &&
+                   from_mt.mutbl == hir::Mutability::MutImmutable {
                     cx.span_lint(MUTABLE_TRANSMUTES, expr.span, msg);
                 }
             }
-            _ => ()
+            _ => (),
         }
 
-        fn get_transmute_from_to<'a, 'tcx>(cx: &LateContext<'a, 'tcx>, expr: &hir::Expr)
-            -> Option<(&'tcx ty::TypeVariants<'tcx>, &'tcx ty::TypeVariants<'tcx>)> {
-            match expr.node {
-                hir::ExprPath(..) => (),
-                _ => return None
-            }
-            if let Def::Fn(did) = cx.tcx.resolve_expr(expr) {
+        fn get_transmute_from_to<'a, 'tcx>
+            (cx: &LateContext<'a, 'tcx>,
+             expr: &hir::Expr)
+             -> Option<(&'tcx ty::TypeVariants<'tcx>, &'tcx ty::TypeVariants<'tcx>)> {
+            let def = if let hir::ExprPath(ref qpath) = expr.node {
+                cx.tables.qpath_def(qpath, expr.hir_id)
+            } else {
+                return None;
+            };
+            if let Def::Fn(did) = def {
                 if !def_id_is_transmute(cx, did) {
                     return None;
                 }
-                let typ = cx.tcx.node_id_to_type(expr.id);
-                match typ.sty {
-                    ty::TyFnDef(_, _, ref bare_fn) if bare_fn.abi == RustIntrinsic => {
-                        if let ty::FnConverging(to) = bare_fn.sig.0.output {
-                            let from = bare_fn.sig.0.inputs[0];
-                            return Some((&from.sty, &to.sty));
-                        }
-                    },
-                    _ => ()
-                }
+                let sig = cx.tables.node_id_to_type(expr.hir_id).fn_sig(cx.tcx);
+                let from = sig.inputs().skip_binder()[0];
+                let to = *sig.output().skip_binder();
+                return Some((&from.sty, &to.sty));
             }
             None
         }
 
         fn def_id_is_transmute(cx: &LateContext, def_id: DefId) -> bool {
-            match cx.tcx.lookup_item_type(def_id).ty.sty {
-                ty::TyFnDef(_, _, ref bfty) if bfty.abi == RustIntrinsic => (),
-                _ => return false
-            }
-            cx.tcx.with_path(def_id, |path| match path.last() {
-                Some(ref last) => last.name().as_str() == "transmute",
-                _ => false
-            })
+            cx.tcx.fn_sig(def_id).abi() == RustIntrinsic &&
+            cx.tcx.item_name(def_id) == "transmute"
         }
     }
 }
@@ -1110,67 +1215,150 @@ impl LintPass for UnstableFeatures {
     }
 }
 
-impl LateLintPass for UnstableFeatures {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnstableFeatures {
     fn check_attribute(&mut self, ctx: &LateContext, attr: &ast::Attribute) {
-        if attr::contains_name(&[attr.node.value.clone()], "feature") {
-            if let Some(items) = attr.node.value.meta_item_list() {
+        if attr.check_name("feature") {
+            if let Some(items) = attr.meta_item_list() {
                 for item in items {
-                    ctx.span_lint(UNSTABLE_FEATURES, item.span, "unstable feature");
+                    ctx.span_lint(UNSTABLE_FEATURES, item.span(), "unstable feature");
                 }
             }
         }
     }
 }
 
-/// Lints for attempts to impl Drop on types that have `#[repr(C)]`
-/// attribute (see issue #24585).
-#[derive(Copy, Clone)]
-pub struct DropWithReprExtern;
+/// Lint for unions that contain fields with possibly non-trivial destructors.
+pub struct UnionsWithDropFields;
 
 declare_lint! {
-    DROP_WITH_REPR_EXTERN,
+    UNIONS_WITH_DROP_FIELDS,
     Warn,
-    "use of #[repr(C)] on a type that implements Drop"
+    "use of unions that contain fields with possibly non-trivial drop code"
 }
 
-impl LintPass for DropWithReprExtern {
+impl LintPass for UnionsWithDropFields {
     fn get_lints(&self) -> LintArray {
-        lint_array!(DROP_WITH_REPR_EXTERN)
+        lint_array!(UNIONS_WITH_DROP_FIELDS)
     }
 }
 
-impl LateLintPass for DropWithReprExtern {
-    fn check_crate(&mut self, ctx: &LateContext, _: &hir::Crate) {
-        let drop_trait = match ctx.tcx.lang_items.drop_trait() {
-            Some(id) => ctx.tcx.lookup_trait_def(id), None => { return }
-        };
-        drop_trait.for_each_impl(ctx.tcx, |drop_impl_did| {
-            if !drop_impl_did.is_local() {
-                return;
-            }
-            let dtor_self_type = ctx.tcx.lookup_item_type(drop_impl_did).ty;
-
-            match dtor_self_type.sty {
-                ty::TyEnum(self_type_def, _) |
-                ty::TyStruct(self_type_def, _) => {
-                    let self_type_did = self_type_def.did;
-                    let hints = ctx.tcx.lookup_repr_hints(self_type_did);
-                    if hints.iter().any(|attr| *attr == attr::ReprExtern) &&
-                        self_type_def.dtor_kind().has_drop_flag() {
-                        let drop_impl_span = ctx.tcx.map.def_id_span(drop_impl_did,
-                                                                     codemap::DUMMY_SP);
-                        let self_defn_span = ctx.tcx.map.def_id_span(self_type_did,
-                                                                     codemap::DUMMY_SP);
-                        ctx.span_lint_note(DROP_WITH_REPR_EXTERN,
-                                           drop_impl_span,
-                                           "implementing Drop adds hidden state to types, \
-                                            possibly conflicting with `#[repr(C)]`",
-                                            self_defn_span,
-                                            "the `#[repr(C)]` attribute is attached here");
-                    }
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnionsWithDropFields {
+    fn check_item(&mut self, ctx: &LateContext, item: &hir::Item) {
+        if let hir::ItemUnion(ref vdata, _) = item.node {
+            for field in vdata.fields() {
+                let field_ty = ctx.tcx.type_of(ctx.tcx.hir.local_def_id(field.id));
+                if field_ty.needs_drop(ctx.tcx, ctx.param_env) {
+                    ctx.span_lint(UNIONS_WITH_DROP_FIELDS,
+                                  field.span,
+                                  "union contains a field with possibly non-trivial drop code, \
+                                   drop code of union fields is ignored when dropping the union");
+                    return;
                 }
-                _ => {}
             }
-        })
+        }
+    }
+}
+
+/// Lint for items marked `pub` that aren't reachable from other crates
+pub struct UnreachablePub;
+
+declare_lint! {
+    pub UNREACHABLE_PUB,
+    Allow,
+    "`pub` items not reachable from crate root"
+}
+
+impl LintPass for UnreachablePub {
+    fn get_lints(&self) -> LintArray {
+        lint_array!(UNREACHABLE_PUB)
+    }
+}
+
+impl UnreachablePub {
+    fn perform_lint(&self, cx: &LateContext, what: &str, id: ast::NodeId,
+                    vis: &hir::Visibility, span: Span, exportable: bool) {
+        if !cx.access_levels.is_reachable(id) && *vis == hir::Visibility::Public {
+            let def_span = cx.tcx.sess.codemap().def_span(span);
+            let mut err = cx.struct_span_lint(UNREACHABLE_PUB, def_span,
+                                              &format!("unreachable `pub` {}", what));
+            // visibility is token at start of declaration (can be macro
+            // variable rather than literal `pub`)
+            let pub_span = cx.tcx.sess.codemap().span_until_char(def_span, ' ');
+            let replacement = if cx.tcx.features().crate_visibility_modifier {
+                "crate"
+            } else {
+                "pub(crate)"
+            }.to_owned();
+            err.span_suggestion(pub_span, "consider restricting its visibility", replacement);
+            if exportable {
+                err.help("or consider exporting it for use by other crates");
+            }
+            err.emit();
+        }
+    }
+}
+
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnreachablePub {
+    fn check_item(&mut self, cx: &LateContext, item: &hir::Item) {
+        self.perform_lint(cx, "item", item.id, &item.vis, item.span, true);
+    }
+
+    fn check_foreign_item(&mut self, cx: &LateContext, foreign_item: &hir::ForeignItem) {
+        self.perform_lint(cx, "item", foreign_item.id, &foreign_item.vis, foreign_item.span, true);
+    }
+
+    fn check_struct_field(&mut self, cx: &LateContext, field: &hir::StructField) {
+        self.perform_lint(cx, "field", field.id, &field.vis, field.span, false);
+    }
+
+    fn check_impl_item(&mut self, cx: &LateContext, impl_item: &hir::ImplItem) {
+        self.perform_lint(cx, "item", impl_item.id, &impl_item.vis, impl_item.span, false);
+    }
+}
+
+/// Lint for trait and lifetime bounds that are (accidentally) accepted by the parser, but
+/// ignored later.
+
+pub struct IgnoredGenericBounds;
+
+declare_lint! {
+    IGNORED_GENERIC_BOUNDS,
+    Warn,
+    "these generic bounds are ignored"
+}
+
+impl LintPass for IgnoredGenericBounds {
+    fn get_lints(&self) -> LintArray {
+        lint_array!(IGNORED_GENERIC_BOUNDS)
+    }
+}
+
+impl EarlyLintPass for IgnoredGenericBounds {
+    fn check_item(&mut self, cx: &EarlyContext, item: &ast::Item) {
+        let type_alias_generics = match item.node {
+            ast::ItemKind::Ty(_, ref generics) => generics,
+            _ => return,
+        };
+        // There must not be a where clause
+        if !type_alias_generics.where_clause.predicates.is_empty() {
+            let spans : Vec<_> = type_alias_generics.where_clause.predicates.iter()
+                .map(|pred| pred.span()).collect();
+            cx.span_lint(IGNORED_GENERIC_BOUNDS, spans,
+                "where clauses are ignored in type aliases");
+        }
+        // The parameters must not have bounds
+        for param in type_alias_generics.params.iter() {
+            let spans : Vec<_> = match param {
+                &ast::GenericParam::Lifetime(ref l) => l.bounds.iter().map(|b| b.span).collect(),
+                &ast::GenericParam::Type(ref ty) => ty.bounds.iter().map(|b| b.span()).collect(),
+            };
+            if !spans.is_empty() {
+                cx.span_lint(
+                    IGNORED_GENERIC_BOUNDS,
+                    spans,
+                    "bounds on generic parameters are ignored in type aliases",
+                );
+            }
+        }
     }
 }

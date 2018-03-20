@@ -9,14 +9,17 @@ links = "jemalloc"
 name = "alloc_jemalloc"
 path = "lib.rs"
 test = false
+doc = false
 
 [dependencies]
+alloc = { path = "../liballoc" }
+alloc_system = { path = "../liballoc_system" }
 core = { path = "../libcore" }
 libc = { path = "../rustc/libc_shim" }
 
 [build-dependencies]
 build_helper = { path = "../build_helper" }
-gcc = "0.3.17"
+cc = "1.0.1"
 
 [features]
 debug = []

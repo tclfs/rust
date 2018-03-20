@@ -9,8 +9,9 @@
 // except according to those terms.
 
 fn main() {
-    for (ref i,) in [].iter() { //~ ERROR mismatched types
+    // NB: this (almost) typechecks when default binding modes are enabled.
+    for (ref i,) in [].iter() {
+        //~^ ERROR non-reference pattern used to match a reference
         i.clone();
-        //~^ ERROR: the type of this value must be known in this context
     }
 }

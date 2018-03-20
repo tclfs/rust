@@ -15,39 +15,45 @@
 //! optimal solution to the constraints. The final variance for each
 //! inferred is then written into the `variance_map` in the tcx.
 
-use middle::subst::VecPerParamSpace;
-use middle::ty;
-use std::rc::Rc;
+use rustc::hir::def_id::DefId;
+use rustc::ty;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::sync::Lrc;
 
 use super::constraints::*;
 use super::terms::*;
 use super::terms::VarianceTerm::*;
-use super::terms::ParamKind::*;
 use super::xform::*;
 
 struct SolveContext<'a, 'tcx: 'a> {
     terms_cx: TermsContext<'a, 'tcx>,
-    constraints: Vec<Constraint<'a>> ,
+    constraints: Vec<Constraint<'a>>,
 
     // Maps from an InferredIndex to the inferred value for that variable.
-    solutions: Vec<ty::Variance>
+    solutions: Vec<ty::Variance>,
 }
 
-pub fn solve_constraints(constraints_cx: ConstraintContext) {
+pub fn solve_constraints(constraints_cx: ConstraintContext) -> ty::CrateVariancesMap {
     let ConstraintContext { terms_cx, constraints, .. } = constraints_cx;
 
-    let solutions =
-        terms_cx.inferred_infos.iter()
-                               .map(|ii| ii.initial_variance)
-                               .collect();
+    let mut solutions = vec![ty::Bivariant; terms_cx.inferred_terms.len()];
+    for &(id, ref variances) in &terms_cx.lang_items {
+        let InferredIndex(start) = terms_cx.inferred_starts[&id];
+        for (i, &variance) in variances.iter().enumerate() {
+            solutions[start + i] = variance;
+        }
+    }
 
     let mut solutions_cx = SolveContext {
-        terms_cx: terms_cx,
-        constraints: constraints,
-        solutions: solutions
+        terms_cx,
+        constraints,
+        solutions,
     };
     solutions_cx.solve();
-    solutions_cx.write();
+    let variances = solutions_cx.create_map();
+    let empty_variance = Lrc::new(Vec::new());
+
+    ty::CrateVariancesMap { variances, empty_variance }
 }
 
 impl<'a, 'tcx> SolveContext<'a, 'tcx> {
@@ -68,15 +74,12 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
                 let old_value = self.solutions[inferred];
                 let new_value = glb(variance, old_value);
                 if old_value != new_value {
-                    debug!("Updating inferred {} (node {}) \
+                    debug!("Updating inferred {} \
                             from {:?} to {:?} due to {:?}",
-                            inferred,
-                            self.terms_cx
-                                .inferred_infos[inferred]
-                                .param_id,
-                            old_value,
-                            new_value,
-                            term);
+                           inferred,
+                           old_value,
+                           new_value,
+                           term);
 
                     self.solutions[inferred] = new_value;
                     changed = true;
@@ -85,73 +88,34 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
         }
     }
 
-    fn write(&self) {
-        // Collect all the variances for a particular item and stick
-        // them into the variance map. We rely on the fact that we
-        // generate all the inferreds for a particular item
-        // consecutively (that is, we collect solutions for an item
-        // until we see a new item id, and we assume (1) the solutions
-        // are in the same order as the type parameters were declared
-        // and (2) all solutions or a given item appear before a new
-        // item id).
-
+    fn create_map(&self) -> FxHashMap<DefId, Lrc<Vec<ty::Variance>>> {
         let tcx = self.terms_cx.tcx;
 
-        // Ignore the writes here because the relevant edges were
-        // already accounted for in `constraints.rs`. See the section
-        // on dependency graph management in README.md for more
-        // information.
-        let _ignore = tcx.dep_graph.in_ignore();
-
         let solutions = &self.solutions;
-        let inferred_infos = &self.terms_cx.inferred_infos;
-        let mut index = 0;
-        let num_inferred = self.terms_cx.num_inferred();
-        while index < num_inferred {
-            let item_id = inferred_infos[index].item_id;
-            let mut types = VecPerParamSpace::empty();
-            let mut regions = VecPerParamSpace::empty();
+        self.terms_cx.inferred_starts.iter().map(|(&id, &InferredIndex(start))| {
+            let def_id = tcx.hir.local_def_id(id);
+            let generics = tcx.generics_of(def_id);
 
-            while index < num_inferred && inferred_infos[index].item_id == item_id {
-                let info = &inferred_infos[index];
-                let variance = solutions[index];
-                debug!("Index {} Info {} / {:?} / {:?} Variance {:?}",
-                       index, info.index, info.kind, info.space, variance);
-                match info.kind {
-                    TypeParam => { types.push(info.space, variance); }
-                    RegionParam => { regions.push(info.space, variance); }
+            let mut variances = solutions[start..start+generics.count()].to_vec();
+
+            debug!("id={} variances={:?}", id, variances);
+
+            // Functions can have unused type parameters: make those invariant.
+            if let ty::TyFnDef(..) = tcx.type_of(def_id).sty {
+                for variance in &mut variances {
+                    if *variance == ty::Bivariant {
+                        *variance = ty::Invariant;
+                    }
                 }
-
-                index += 1;
             }
 
-            let item_variances = ty::ItemVariances {
-                types: types,
-                regions: regions
-            };
-            debug!("item_id={} item_variances={:?}",
-                    item_id,
-                    item_variances);
-
-            let item_def_id = tcx.map.local_def_id(item_id);
-
-            // For unit testing: check for a special "rustc_variance"
-            // attribute and report an error with various results if found.
-            if tcx.has_attr(item_def_id, "rustc_variance") {
-                span_err!(tcx.sess, tcx.map.span(item_id), E0208, "{:?}", item_variances);
-            }
-
-            let newly_added = tcx.item_variance_map.borrow_mut()
-                                 .insert(item_def_id, Rc::new(item_variances)).is_none();
-            assert!(newly_added);
-        }
+            (def_id, Lrc::new(variances))
+        }).collect()
     }
 
     fn evaluate(&self, term: VarianceTermPtr<'a>) -> ty::Variance {
         match *term {
-            ConstantTerm(v) => {
-                v
-            }
+            ConstantTerm(v) => v,
 
             TransformTerm(t1, t2) => {
                 let v1 = self.evaluate(t1);
@@ -159,9 +123,7 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
                 v1.xform(v2)
             }
 
-            InferredTerm(InferredIndex(index)) => {
-                self.solutions[index]
-            }
+            InferredTerm(InferredIndex(index)) => self.solutions[index],
         }
     }
 }

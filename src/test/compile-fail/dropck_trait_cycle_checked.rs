@@ -13,8 +13,6 @@
 //
 // (Compare against compile-fail/dropck_vec_cycle_checked.rs)
 
-#![feature(const_fn)]
-
 use std::cell::Cell;
 use id::Id;
 

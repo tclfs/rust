@@ -8,28 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-use fmt::{self, Write, FlagV1};
+use fmt;
 
-struct PadAdapter<'a, 'b: 'a> {
-    fmt: &'a mut fmt::Formatter<'b>,
+struct PadAdapter<'a> {
+    buf: &'a mut (fmt::Write + 'a),
     on_newline: bool,
 }
 
-impl<'a, 'b: 'a> PadAdapter<'a, 'b> {
-    fn new(fmt: &'a mut fmt::Formatter<'b>) -> PadAdapter<'a, 'b> {
-        PadAdapter {
-            fmt: fmt,
-            on_newline: false,
-        }
+impl<'a> PadAdapter<'a> {
+    fn wrap<'b, 'c: 'a+'b>(fmt: &'c mut fmt::Formatter, slot: &'b mut Option<Self>)
+                        -> fmt::Formatter<'b> {
+        fmt.wrap_buf(move |buf| {
+            *slot = Some(PadAdapter {
+                buf,
+                on_newline: false,
+            });
+            slot.as_mut().unwrap()
+        })
     }
 }
 
-impl<'a, 'b: 'a> fmt::Write for PadAdapter<'a, 'b> {
+impl<'a> fmt::Write for PadAdapter<'a> {
     fn write_str(&mut self, mut s: &str) -> fmt::Result {
         while !s.is_empty() {
             if self.on_newline {
-                try!(self.fmt.write_str("    "));
+                self.buf.write_str("    ")?;
             }
 
             let split = match s.find('\n') {
@@ -42,7 +45,7 @@ impl<'a, 'b: 'a> fmt::Write for PadAdapter<'a, 'b> {
                     s.len()
                 }
             };
-            try!(self.fmt.write_str(&s[..split]));
+            self.buf.write_str(&s[..split])?;
             s = &s[split..];
         }
 
@@ -50,10 +53,39 @@ impl<'a, 'b: 'a> fmt::Write for PadAdapter<'a, 'b> {
     }
 }
 
-/// A struct to help with `fmt::Debug` implementations.
+/// A struct to help with [`fmt::Debug`](trait.Debug.html) implementations.
 ///
-/// Constructed by the `Formatter::debug_struct` method.
+/// This is useful when you wish to output a formatted struct as a part of your
+/// [`Debug::fmt`](trait.Debug.html#tymethod.fmt) implementation.
+///
+/// This can be constructed by the
+/// [`Formatter::debug_struct`](struct.Formatter.html#method.debug_struct)
+/// method.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// struct Foo {
+///     bar: i32,
+///     baz: String,
+/// }
+///
+/// impl fmt::Debug for Foo {
+///     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+///         fmt.debug_struct("Foo")
+///            .field("bar", &self.bar)
+///            .field("baz", &self.baz)
+///            .finish()
+///     }
+/// }
+///
+/// // prints "Foo { bar: 10, baz: "Hello World" }"
+/// println!("{:?}", Foo { bar: 10, baz: "Hello World".to_string() });
+/// ```
 #[must_use]
+#[allow(missing_debug_implementations)]
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub struct DebugStruct<'a, 'b: 'a> {
     fmt: &'a mut fmt::Formatter<'b>,
@@ -66,8 +98,8 @@ pub fn debug_struct_new<'a, 'b>(fmt: &'a mut fmt::Formatter<'b>,
                                 -> DebugStruct<'a, 'b> {
     let result = fmt.write_str(name);
     DebugStruct {
-        fmt: fmt,
-        result: result,
+        fmt,
+        result,
         has_fields: false,
     }
 }
@@ -84,11 +116,16 @@ impl<'a, 'b: 'a> DebugStruct<'a, 'b> {
             };
 
             if self.is_pretty() {
-                let mut writer = PadAdapter::new(self.fmt);
-                fmt::write(&mut writer,
-                           format_args!("{}\n{}: {:#?}", prefix, name, value))
+                let mut slot = None;
+                let mut writer = PadAdapter::wrap(&mut self.fmt, &mut slot);
+                writer.write_str(prefix)?;
+                writer.write_str("\n")?;
+                writer.write_str(name)?;
+                writer.write_str(": ")?;
+                value.fmt(&mut writer)
             } else {
-                write!(self.fmt, "{} {}: {:?}", prefix, name, value)
+                write!(self.fmt, "{} {}: ", prefix, name)?;
+                value.fmt(self.fmt)
             }
         });
 
@@ -112,14 +149,40 @@ impl<'a, 'b: 'a> DebugStruct<'a, 'b> {
     }
 
     fn is_pretty(&self) -> bool {
-        self.fmt.flags() & (1 << (FlagV1::Alternate as usize)) != 0
+        self.fmt.alternate()
     }
 }
 
-/// A struct to help with `fmt::Debug` implementations.
+/// A struct to help with [`fmt::Debug`](trait.Debug.html) implementations.
 ///
-/// Constructed by the `Formatter::debug_tuple` method.
+/// This is useful when you wish to output a formatted tuple as a part of your
+/// [`Debug::fmt`](trait.Debug.html#tymethod.fmt) implementation.
+///
+/// This can be constructed by the
+/// [`Formatter::debug_tuple`](struct.Formatter.html#method.debug_tuple)
+/// method.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// struct Foo(i32, String);
+///
+/// impl fmt::Debug for Foo {
+///     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+///         fmt.debug_tuple("Foo")
+///            .field(&self.0)
+///            .field(&self.1)
+///            .finish()
+///     }
+/// }
+///
+/// // prints "Foo(10, "Hello World")"
+/// println!("{:?}", Foo(10, "Hello World".to_string()));
+/// ```
 #[must_use]
+#[allow(missing_debug_implementations)]
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub struct DebugTuple<'a, 'b: 'a> {
     fmt: &'a mut fmt::Formatter<'b>,
@@ -131,8 +194,8 @@ pub struct DebugTuple<'a, 'b: 'a> {
 pub fn debug_tuple_new<'a, 'b>(fmt: &'a mut fmt::Formatter<'b>, name: &str) -> DebugTuple<'a, 'b> {
     let result = fmt.write_str(name);
     DebugTuple {
-        fmt: fmt,
-        result: result,
+        fmt,
+        result,
         fields: 0,
         empty_name: name.is_empty(),
     }
@@ -150,10 +213,15 @@ impl<'a, 'b: 'a> DebugTuple<'a, 'b> {
             };
 
             if self.is_pretty() {
-                let mut writer = PadAdapter::new(self.fmt);
-                fmt::write(&mut writer, format_args!("{}\n{:#?}", prefix, value))
+                let mut slot = None;
+                let mut writer = PadAdapter::wrap(&mut self.fmt, &mut slot);
+                writer.write_str(prefix)?;
+                writer.write_str("\n")?;
+                value.fmt(&mut writer)
             } else {
-                write!(self.fmt, "{}{}{:?}", prefix, space, value)
+                self.fmt.write_str(prefix)?;
+                self.fmt.write_str(space)?;
+                value.fmt(self.fmt)
             }
         });
 
@@ -167,10 +235,10 @@ impl<'a, 'b: 'a> DebugTuple<'a, 'b> {
         if self.fields > 0 {
             self.result = self.result.and_then(|_| {
                 if self.is_pretty() {
-                    try!(self.fmt.write_str("\n"));
+                    self.fmt.write_str("\n")?;
                 }
                 if self.fields == 1 && self.empty_name {
-                    try!(self.fmt.write_str(","));
+                    self.fmt.write_str(",")?;
                 }
                 self.fmt.write_str(")")
             });
@@ -179,7 +247,7 @@ impl<'a, 'b: 'a> DebugTuple<'a, 'b> {
     }
 
     fn is_pretty(&self) -> bool {
-        self.fmt.flags() & (1 << (FlagV1::Alternate as usize)) != 0
+        self.fmt.alternate()
     }
 }
 
@@ -193,20 +261,19 @@ impl<'a, 'b: 'a> DebugInner<'a, 'b> {
     fn entry(&mut self, entry: &fmt::Debug) {
         self.result = self.result.and_then(|_| {
             if self.is_pretty() {
-                let mut writer = PadAdapter::new(self.fmt);
-                let prefix = if self.has_fields {
-                    ","
+                let mut slot = None;
+                let mut writer = PadAdapter::wrap(&mut self.fmt, &mut slot);
+                writer.write_str(if self.has_fields {
+                    ",\n"
                 } else {
-                    ""
-                };
-                fmt::write(&mut writer, format_args!("{}\n{:#?}", prefix, entry))
+                    "\n"
+                })?;
+                entry.fmt(&mut writer)
             } else {
-                let prefix = if self.has_fields {
-                    ", "
-                } else {
-                    ""
-                };
-                write!(self.fmt, "{}{:?}", prefix, entry)
+                if self.has_fields {
+                    self.fmt.write_str(", ")?
+                }
+                entry.fmt(self.fmt)
             }
         });
 
@@ -223,14 +290,37 @@ impl<'a, 'b: 'a> DebugInner<'a, 'b> {
     }
 
     fn is_pretty(&self) -> bool {
-        self.fmt.flags() & (1 << (FlagV1::Alternate as usize)) != 0
+        self.fmt.alternate()
     }
 }
 
-/// A struct to help with `fmt::Debug` implementations.
+/// A struct to help with [`fmt::Debug`](trait.Debug.html) implementations.
 ///
-/// Constructed by the `Formatter::debug_set` method.
+/// This is useful when you wish to output a formatted set of items as a part
+/// of your [`Debug::fmt`](trait.Debug.html#tymethod.fmt) implementation.
+///
+/// This can be constructed by the
+/// [`Formatter::debug_set`](struct.Formatter.html#method.debug_set)
+/// method.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// struct Foo(Vec<i32>);
+///
+/// impl fmt::Debug for Foo {
+///     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+///         fmt.debug_set().entries(self.0.iter()).finish()
+///     }
+/// }
+///
+/// // prints "{10, 11}"
+/// println!("{:?}", Foo(vec![10, 11]));
+/// ```
 #[must_use]
+#[allow(missing_debug_implementations)]
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub struct DebugSet<'a, 'b: 'a> {
     inner: DebugInner<'a, 'b>,
@@ -240,8 +330,8 @@ pub fn debug_set_new<'a, 'b>(fmt: &'a mut fmt::Formatter<'b>) -> DebugSet<'a, 'b
     let result = write!(fmt, "{{");
     DebugSet {
         inner: DebugInner {
-            fmt: fmt,
-            result: result,
+            fmt,
+            result,
             has_fields: false,
         },
     }
@@ -275,10 +365,33 @@ impl<'a, 'b: 'a> DebugSet<'a, 'b> {
     }
 }
 
-/// A struct to help with `fmt::Debug` implementations.
+/// A struct to help with [`fmt::Debug`](trait.Debug.html) implementations.
 ///
-/// Constructed by the `Formatter::debug_list` method.
+/// This is useful when you wish to output a formatted list of items as a part
+/// of your [`Debug::fmt`](trait.Debug.html#tymethod.fmt) implementation.
+///
+/// This can be constructed by the
+/// [`Formatter::debug_list`](struct.Formatter.html#method.debug_list)
+/// method.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// struct Foo(Vec<i32>);
+///
+/// impl fmt::Debug for Foo {
+///     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+///         fmt.debug_list().entries(self.0.iter()).finish()
+///     }
+/// }
+///
+/// // prints "[10, 11]"
+/// println!("{:?}", Foo(vec![10, 11]));
+/// ```
 #[must_use]
+#[allow(missing_debug_implementations)]
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub struct DebugList<'a, 'b: 'a> {
     inner: DebugInner<'a, 'b>,
@@ -288,8 +401,8 @@ pub fn debug_list_new<'a, 'b>(fmt: &'a mut fmt::Formatter<'b>) -> DebugList<'a, 
     let result = write!(fmt, "[");
     DebugList {
         inner: DebugInner {
-            fmt: fmt,
-            result: result,
+            fmt,
+            result,
             has_fields: false,
         },
     }
@@ -323,10 +436,33 @@ impl<'a, 'b: 'a> DebugList<'a, 'b> {
     }
 }
 
-/// A struct to help with `fmt::Debug` implementations.
+/// A struct to help with [`fmt::Debug`](trait.Debug.html) implementations.
 ///
-/// Constructed by the `Formatter::debug_map` method.
+/// This is useful when you wish to output a formatted map as a part of your
+/// [`Debug::fmt`](trait.Debug.html#tymethod.fmt) implementation.
+///
+/// This can be constructed by the
+/// [`Formatter::debug_map`](struct.Formatter.html#method.debug_map)
+/// method.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// struct Foo(Vec<(String, i32)>);
+///
+/// impl fmt::Debug for Foo {
+///     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+///         fmt.debug_map().entries(self.0.iter().map(|&(ref k, ref v)| (k, v))).finish()
+///     }
+/// }
+///
+/// // prints "{"A": 10, "B": 11}"
+/// println!("{:?}", Foo(vec![("A".to_string(), 10), ("B".to_string(), 11)]));
+/// ```
 #[must_use]
+#[allow(missing_debug_implementations)]
 #[stable(feature = "debug_builders", since = "1.2.0")]
 pub struct DebugMap<'a, 'b: 'a> {
     fmt: &'a mut fmt::Formatter<'b>,
@@ -337,8 +473,8 @@ pub struct DebugMap<'a, 'b: 'a> {
 pub fn debug_map_new<'a, 'b>(fmt: &'a mut fmt::Formatter<'b>) -> DebugMap<'a, 'b> {
     let result = write!(fmt, "{{");
     DebugMap {
-        fmt: fmt,
-        result: result,
+        fmt,
+        result,
         has_fields: false,
     }
 }
@@ -349,21 +485,23 @@ impl<'a, 'b: 'a> DebugMap<'a, 'b> {
     pub fn entry(&mut self, key: &fmt::Debug, value: &fmt::Debug) -> &mut DebugMap<'a, 'b> {
         self.result = self.result.and_then(|_| {
             if self.is_pretty() {
-                let mut writer = PadAdapter::new(self.fmt);
-                let prefix = if self.has_fields {
-                    ","
+                let mut slot = None;
+                let mut writer = PadAdapter::wrap(&mut self.fmt, &mut slot);
+                writer.write_str(if self.has_fields {
+                    ",\n"
                 } else {
-                    ""
-                };
-                fmt::write(&mut writer,
-                           format_args!("{}\n{:#?}: {:#?}", prefix, key, value))
+                    "\n"
+                })?;
+                key.fmt(&mut writer)?;
+                writer.write_str(": ")?;
+                value.fmt(&mut writer)
             } else {
-                let prefix = if self.has_fields {
-                    ", "
-                } else {
-                    ""
-                };
-                write!(self.fmt, "{}{:?}: {:?}", prefix, key, value)
+                if self.has_fields {
+                    self.fmt.write_str(", ")?
+                }
+                key.fmt(self.fmt)?;
+                self.fmt.write_str(": ")?;
+                value.fmt(self.fmt)
             }
         });
 
@@ -396,6 +534,6 @@ impl<'a, 'b: 'a> DebugMap<'a, 'b> {
     }
 
     fn is_pretty(&self) -> bool {
-        self.fmt.flags() & (1 << (FlagV1::Alternate as usize)) != 0
+        self.fmt.alternate()
     }
 }

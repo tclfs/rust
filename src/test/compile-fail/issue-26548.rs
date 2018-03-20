@@ -8,10 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// error-pattern: cyclic dependency detected
+// note-pattern: the cycle begins when computing layout of
+// note-pattern: ...which then requires computing layout of
+// note-pattern: ...which then again requires computing layout of
+
+
 trait Mirror { type It: ?Sized; }
 impl<T: ?Sized> Mirror for T { type It = Self; }
 struct S(Option<<S as Mirror>::It>);
-//~^ ERROR recursive type `S` has infinite size
 
 fn main() {
     let _s = S(None);

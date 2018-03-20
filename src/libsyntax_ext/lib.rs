@@ -10,65 +10,124 @@
 
 //! Syntax extensions in the Rust compiler.
 
-#![crate_name = "syntax_ext"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_char)]
+#![feature(proc_macro_internals)]
+#![feature(decl_macro)]
+#![feature(str_escape)]
 
 extern crate fmt_macros;
 #[macro_use]
 extern crate syntax;
+extern crate syntax_pos;
+extern crate proc_macro;
+extern crate rustc_data_structures;
+extern crate rustc_errors as errors;
 
-use syntax::ext::base::{MacroExpanderFn, NormalTT};
-use syntax::ext::base::{SyntaxEnv, SyntaxExtension};
-use syntax::parse::token::intern;
-
-
+mod assert;
 mod asm;
 mod cfg;
+mod compile_error;
 mod concat;
 mod concat_idents;
 mod env;
 mod format;
+mod format_foreign;
+mod global_asm;
 mod log_syntax;
 mod trace_macros;
+
+pub mod proc_macro_registrar;
 
 // for custom_derive
 pub mod deriving;
 
-pub fn register_builtins(env: &mut SyntaxEnv) {
-    // utility function to simplify creating NormalTT syntax extensions
-    fn builtin_normal_expander(f: MacroExpanderFn) -> SyntaxExtension {
-        NormalTT(Box::new(f), None, false)
+pub mod proc_macro_impl;
+
+use rustc_data_structures::sync::Lrc;
+use syntax::ast;
+use syntax::ext::base::{MacroExpanderFn, NormalTT, NamedSyntaxExtension};
+use syntax::symbol::Symbol;
+
+pub fn register_builtins(resolver: &mut syntax::ext::base::Resolver,
+                         user_exts: Vec<NamedSyntaxExtension>,
+                         enable_quotes: bool) {
+    deriving::register_builtin_derives(resolver);
+
+    let mut register = |name, ext| {
+        resolver.add_builtin(ast::Ident::with_empty_ctxt(name), Lrc::new(ext));
+    };
+
+    macro_rules! register {
+        ($( $name:ident: $f:expr, )*) => { $(
+            register(Symbol::intern(stringify!($name)),
+                     NormalTT {
+                        expander: Box::new($f as MacroExpanderFn),
+                        def_info: None,
+                        allow_internal_unstable: false,
+                        allow_internal_unsafe: false,
+                        unstable_feature: None,
+                    });
+        )* }
     }
 
-    env.insert(intern("asm"),
-               builtin_normal_expander(asm::expand_asm));
-    env.insert(intern("cfg"),
-               builtin_normal_expander(cfg::expand_cfg));
-    env.insert(intern("concat"),
-               builtin_normal_expander(concat::expand_syntax_ext));
-    env.insert(intern("concat_idents"),
-               builtin_normal_expander(concat_idents::expand_syntax_ext));
-    env.insert(intern("env"),
-               builtin_normal_expander(env::expand_env));
-    env.insert(intern("option_env"),
-               builtin_normal_expander(env::expand_option_env));
-    env.insert(intern("format_args"),
-               // format_args uses `unstable` things internally.
-               NormalTT(Box::new(format::expand_format_args), None, true));
-    env.insert(intern("log_syntax"),
-               builtin_normal_expander(log_syntax::expand_syntax_ext));
-    env.insert(intern("trace_macros"),
-               builtin_normal_expander(trace_macros::expand_trace_macros));
+    if enable_quotes {
+        use syntax::ext::quote::*;
+        register! {
+            quote_tokens: expand_quote_tokens,
+            quote_expr: expand_quote_expr,
+            quote_ty: expand_quote_ty,
+            quote_item: expand_quote_item,
+            quote_pat: expand_quote_pat,
+            quote_arm: expand_quote_arm,
+            quote_stmt: expand_quote_stmt,
+            quote_attr: expand_quote_attr,
+            quote_arg: expand_quote_arg,
+            quote_block: expand_quote_block,
+            quote_meta_item: expand_quote_meta_item,
+            quote_path: expand_quote_path,
+        }
+    }
 
-    deriving::register_all(env);
+    use syntax::ext::source_util::*;
+    register! {
+        line: expand_line,
+        __rust_unstable_column: expand_column_gated,
+        column: expand_column,
+        file: expand_file,
+        stringify: expand_stringify,
+        include: expand_include,
+        include_str: expand_include_str,
+        include_bytes: expand_include_bytes,
+        module_path: expand_mod,
+
+        asm: asm::expand_asm,
+        global_asm: global_asm::expand_global_asm,
+        cfg: cfg::expand_cfg,
+        concat: concat::expand_syntax_ext,
+        concat_idents: concat_idents::expand_syntax_ext,
+        env: env::expand_env,
+        option_env: env::expand_option_env,
+        log_syntax: log_syntax::expand_syntax_ext,
+        trace_macros: trace_macros::expand_trace_macros,
+        compile_error: compile_error::expand_compile_error,
+        assert: assert::expand_assert,
+    }
+
+    // format_args uses `unstable` things internally.
+    register(Symbol::intern("format_args"),
+             NormalTT {
+                expander: Box::new(format::expand_format_args),
+                def_info: None,
+                allow_internal_unstable: true,
+                allow_internal_unsafe: false,
+                unstable_feature: None
+            });
+
+    for (name, ext) in user_exts {
+        register(name, ext);
+    }
 }

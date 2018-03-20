@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(collections)]
-
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::string::String;
@@ -45,7 +43,7 @@ pub fn main() {
     (*(*p).borrow_mut()).y += 3;
     assert_eq!(*(*p).borrow(), Point {x: 3, y: 5});
 
-    let v = Rc::new(RefCell::new(vec!(1, 2, 3)));
+    let v = Rc::new(RefCell::new(vec![1, 2, 3]));
     (*(*v).borrow_mut())[0] = 3;
     (*(*v).borrow_mut())[1] += 3;
     assert_eq!(((*(*v).borrow())[0],

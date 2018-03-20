@@ -8,15 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// compile-flags: -Z continue-parse-after-error
+
 // Test that we can recover from missing braces in the parser.
 
 trait Foo {
     fn bar() {
-        let x = foo(); //~ ERROR unresolved name `foo`
+        let x = foo(); //~ ERROR cannot find function `foo` in this scope
 
 }
 
 fn main() {
     let x = y.;  //~ ERROR unexpected token
-                 //~^ ERROR unresolved name `y`
+                 //~^ ERROR cannot find value `y` in this scope
 } //~ ERROR this file contains an un-closed delimiter

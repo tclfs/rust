@@ -10,13 +10,9 @@
 
 #![feature(optin_builtin_traits)]
 
-trait MyTrait {}
+auto trait MyTrait {}
 
-impl MyTrait for .. {}
-
-unsafe trait MyUnsafeTrait {}
-
-unsafe impl MyUnsafeTrait for .. {}
+unsafe auto trait MyUnsafeTrait {}
 
 struct ThisImplsTrait;
 
@@ -33,10 +29,10 @@ fn is_my_unsafe_trait<T: MyUnsafeTrait>() {}
 fn main() {
     is_my_trait::<ThisImplsTrait>();
     is_my_trait::<ThisImplsUnsafeTrait>();
-    //~^ ERROR the trait `MyTrait` is not implemented for the type `ThisImplsUnsafeTrait`
+    //~^ ERROR `ThisImplsUnsafeTrait: MyTrait` is not satisfied
 
     is_my_unsafe_trait::<ThisImplsTrait>();
-    //~^ ERROR the trait `MyUnsafeTrait` is not implemented for the type `ThisImplsTrait`
+    //~^ ERROR `ThisImplsTrait: MyUnsafeTrait` is not satisfied
 
     is_my_unsafe_trait::<ThisImplsUnsafeTrait>();
 }

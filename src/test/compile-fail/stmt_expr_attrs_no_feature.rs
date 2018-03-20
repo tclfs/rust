@@ -9,7 +9,6 @@
 // except according to those terms.
 
 #![feature(custom_attribute)]
-#![feature(associated_consts)]
 
 macro_rules! stmt_mac {
     () => {
@@ -21,15 +20,15 @@ fn main() {
     #[attr]
     fn a() {}
 
-    #[attr] //~ ERROR 15701
+    #[attr]
     {
 
     }
 
-    #[attr] //~ ERROR 15701
+    #[attr]
     5;
 
-    #[attr] //~ ERROR 15701
+    #[attr]
     stmt_mac!();
 }
 
@@ -43,7 +42,7 @@ fn c() {
 
 #[cfg(not(unset))]
 fn j() {
-    #[attr] //~ ERROR 15701
+    #[attr]
     5;
 }
 
@@ -55,7 +54,7 @@ fn d() {
 
 #[cfg_attr(not(unset), cfg(not(unset)))]
 fn i() {
-    #[attr] //~ ERROR 15701
+    #[attr]
     8;
 }
 
@@ -64,7 +63,7 @@ fn i() {
 macro_rules! item_mac {
     ($e:ident) => {
         fn $e() {
-            #[attr] //~ ERROR 15701
+            #[attr]
             42;
 
             #[cfg(unset)]
@@ -75,7 +74,7 @@ macro_rules! item_mac {
 
             #[cfg(not(unset))]
             fn k() {
-                #[attr] //~ ERROR 15701
+                #[attr]
                 5;
             }
 
@@ -87,7 +86,7 @@ macro_rules! item_mac {
 
             #[cfg_attr(not(unset), cfg(not(unset)))]
             fn h() {
-                #[attr] //~ ERROR 15701
+                #[attr]
                 8;
             }
 

@@ -20,5 +20,5 @@ fn bar<T: Sync>(_: T) {}
 fn main() {
     let x = Foo { a: 5 };
     bar(x);
-    //~^ ERROR the trait `core::marker::Sync` is not implemented
+    //~^ ERROR `Foo` cannot be shared between threads safely [E0277]
 }

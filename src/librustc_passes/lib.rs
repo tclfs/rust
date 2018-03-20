@@ -14,31 +14,38 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "rustc_passes"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![feature(rustc_diagnostic_macros)]
-#![feature(staged_api)]
-#![feature(rustc_private)]
 
-extern crate core;
+#[macro_use]
 extern crate rustc;
-extern crate rustc_front;
+extern crate rustc_mir;
+extern crate rustc_const_math;
+extern crate rustc_data_structures;
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate syntax;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate syntax;
+extern crate syntax_pos;
+extern crate rustc_errors as errors;
 
-pub mod diagnostics;
+use rustc::ty::maps::Providers;
 
-pub mod const_fn;
-pub mod consts;
+mod diagnostics;
+
+pub mod ast_validation;
+pub mod rvalue_promotion;
+pub mod hir_stats;
 pub mod loops;
-pub mod no_asm;
-pub mod rvalues;
-pub mod static_recursion;
+mod mir_stats;
+
+__build_diagnostic_array! { librustc_passes, DIAGNOSTICS }
+
+pub fn provide(providers: &mut Providers) {
+    rvalue_promotion::provide(providers);
+}

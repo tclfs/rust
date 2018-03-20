@@ -8,28 +8,34 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use target::TargetOptions;
+use LinkerFlavor;
+use target::{LinkArgs, TargetOptions, RelroLevel};
 use std::default::Default;
 
 pub fn opts() -> TargetOptions {
+    let mut args = LinkArgs::new();
+    args.insert(LinkerFlavor::Gcc, vec![
+        // GNU-style linkers will use this to omit linking to libraries
+        // which don't actually fulfill any relocations, but only for
+        // libraries which follow this flag.  Thus, use it before
+        // specifying libraries to link to.
+        "-Wl,--as-needed".to_string(),
+
+        // Always enable NX protection when it is available
+        "-Wl,-z,noexecstack".to_string(),
+    ]);
+
     TargetOptions {
-        linker: "cc".to_string(),
         dynamic_linking: true,
         executables: true,
+        target_family: Some("unix".to_string()),
         linker_is_gnu: true,
         has_rpath: true,
-        pre_link_args: vec!(
-            // GNU-style linkers will use this to omit linking to libraries
-            // which don't actually fulfill any relocations, but only for
-            // libraries which follow this flag.  Thus, use it before
-            // specifying libraries to link to.
-            "-Wl,--as-needed".to_string(),
-
-            // Always enable NX protection when it is available
-            "-Wl,-z,noexecstack".to_string(),
-        ),
+        abi_return_struct_as_int: true,
+        pre_link_args: args,
         position_independent_executables: true,
-        exe_allocation_crate: "alloc_system".to_string(),
+        eliminate_frame_pointer: false, // FIXME 43575
+        relro_level: RelroLevel::Full,
         .. Default::default()
     }
 }

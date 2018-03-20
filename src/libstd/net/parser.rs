@@ -13,8 +13,6 @@
 //! This module is "publicly exported" through the `FromStr` implementations
 //! below.
 
-use prelude::v1::*;
-
 use error::Error;
 use fmt;
 use net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -172,11 +170,7 @@ impl<'a> Parser<'a> {
                 return None;
             }
 
-            let octet = self.read_number(10, 3, 0x100).map(|n| n as u8);
-            match octet {
-                Some(d) => bs[i] = d,
-                None => return None,
-            };
+            bs[i] = self.read_number(10, 3, 0x100).map(|n| n as u8)?;
             i += 1;
         }
         Some(Ipv4Addr::new(bs[0], bs[1], bs[2], bs[3]))
@@ -252,7 +246,9 @@ impl<'a> Parser<'a> {
         }
 
         let mut tail = [0; 8];
-        let (tail_size, _) = read_groups(self, &mut tail, 8 - head_size);
+        // `::` indicates one or more groups of 16 bits of zeros
+        let limit = 8 - (head_size + 1);
+        let (tail_size, _) = read_groups(self, &mut tail, limit);
         Some(ipv6_addr_from_head_tail(&head[..head_size], &tail[..tail_size]))
     }
 
@@ -304,7 +300,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
+#[stable(feature = "ip_addr", since = "1.7.0")]
 impl FromStr for IpAddr {
     type Err = AddrParseError;
     fn from_str(s: &str) -> Result<IpAddr, AddrParseError> {
@@ -370,9 +366,40 @@ impl FromStr for SocketAddr {
     }
 }
 
-/// An error returned when parsing an IP address or a socket address.
+/// An error which can be returned when parsing an IP address or a socket address.
+///
+/// This error is used as the error type for the [`FromStr`] implementation for
+/// [`IpAddr`], [`Ipv4Addr`], [`Ipv6Addr`], [`SocketAddr`], [`SocketAddrV4`], and
+/// [`SocketAddrV6`].
+///
+/// # Potential causes
+///
+/// `AddrParseError` may be thrown because the provided string does not parse as the given type,
+/// often because it includes information only handled by a different address type.
+///
+/// ```should_panic
+/// use std::net::IpAddr;
+/// let _foo: IpAddr = "127.0.0.1:8080".parse().expect("Cannot handle the socket port");
+/// ```
+///
+/// [`IpAddr`] doesn't handle the port. Use [`SocketAddr`] instead.
+///
+/// ```
+/// use std::net::SocketAddr;
+///
+/// // No problem, the `panic!` message has disappeared.
+/// let _foo: SocketAddr = "127.0.0.1:8080".parse().expect("unreachable panic");
+/// ```
+///
+/// [`FromStr`]: ../../std/str/trait.FromStr.html
+/// [`IpAddr`]: ../../std/net/enum.IpAddr.html
+/// [`Ipv4Addr`]: ../../std/net/struct.Ipv4Addr.html
+/// [`Ipv6Addr`]: ../../std/net/struct.Ipv6Addr.html
+/// [`SocketAddr`]: ../../std/net/enum.SocketAddr.html
+/// [`SocketAddrV4`]: ../../std/net/struct.SocketAddrV4.html
+/// [`SocketAddrV6`]: ../../std/net/struct.SocketAddrV6.html
 #[stable(feature = "rust1", since = "1.0.0")]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddrParseError(());
 
 #[stable(feature = "addr_parse_error_error", since = "1.4.0")]

@@ -8,18 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use target::TargetOptions;
+use target::{TargetOptions, RelroLevel};
 use std::default::Default;
 
 pub fn opts() -> TargetOptions {
     TargetOptions {
-        linker: "cc".to_string(),
         dynamic_linking: true,
         executables: true,
+        target_family: Some("unix".to_string()),
         linker_is_gnu: true,
         has_rpath: true,
         position_independent_executables: true,
-        exe_allocation_crate: "alloc_system".to_string(),
+        relro_level: RelroLevel::Full,
 
         .. Default::default()
     }

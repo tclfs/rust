@@ -8,10 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// compile-flags: -Z continue-parse-after-error
+
 enum bird {
     pub duck,
     //~^ ERROR: expected identifier, found keyword `pub`
-    //~^^ ERROR: expected
+    //~| ERROR: expected
     goose
 }
 

@@ -26,12 +26,11 @@ impl<'a, 'b> Matcher for CharPredMatcher<'a, 'b> {
 }
 
 trait IntoMatcher<'a, T> {
-    fn into_matcher(self, &'a str) -> T;
+    fn into_matcher(self, _: &'a str) -> T;
 }
 
 impl<'a, 'b, F> IntoMatcher<'a, CharPredMatcher<'a, 'b>> for F where F: FnMut(char) -> bool + 'b {
     fn into_matcher(self, s: &'a str) -> CharPredMatcher<'a, 'b> {
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         CharPredMatcher {
             str: s,
             pred: Box::new(self),

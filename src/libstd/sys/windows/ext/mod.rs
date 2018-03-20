@@ -8,13 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Experimental extensions to `std` for Windows.
+//! Platform-specific extensions to `std` for Windows.
 //!
-//! For now, this module is limited to extracting handles, file
-//! descriptors, and sockets, but its functionality will grow over
-//! time.
+//! Provides access to platform-level information for Windows, and exposes
+//! Windows-specific idioms that would otherwise be inappropriate as part
+//! the core `std` library. These extensions allow developers to use
+//! `std` types and idioms with Windows in a way that the normal
+//! platform-agnostic idioms would not normally support.
 
 #![stable(feature = "rust1", since = "1.0.0")]
+#![doc(cfg(windows))]
 
 pub mod ffi;
 pub mod fs;
@@ -36,4 +39,6 @@ pub mod prelude {
     pub use super::ffi::{OsStrExt, OsStringExt};
     #[doc(no_inline)] #[stable(feature = "rust1", since = "1.0.0")]
     pub use super::fs::{OpenOptionsExt, MetadataExt};
+    #[doc(no_inline)] #[stable(feature = "file_offset", since = "1.15.0")]
+    pub use super::fs::FileExt;
 }

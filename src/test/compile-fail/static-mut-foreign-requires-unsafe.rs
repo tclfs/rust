@@ -8,10 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern crate libc;
-
 extern {
-    static mut a: libc::c_int;
+    static mut a: i32;
 }
 
 fn main() {

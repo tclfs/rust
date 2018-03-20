@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
+
 use std::env;
 use std::process::{self, Command, Stdio};
 

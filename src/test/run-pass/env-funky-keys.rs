@@ -12,7 +12,8 @@
 
 // ignore-android
 // ignore-windows
-// ignore-emscripten
+// ignore-cloudabi no execve
+// ignore-emscripten no execve
 // no-prefer-dynamic
 
 #![feature(libc)]

@@ -9,31 +9,51 @@
 // except according to those terms.
 
 // ignore-emscripten no threads support
+#![feature(rustc_attrs)]
 
-#![feature(zero_one)]
-
-use std::num::Zero;
 use std::thread;
 
+trait Int {
+    fn zero() -> Self;
+    fn one() -> Self;
+}
+macro_rules! doit {
+    ($($t:ident)*) => ($(impl Int for $t {
+        fn zero() -> $t { 0 }
+        fn one() -> $t { 1 }
+    })*)
+}
+doit! { i8 i16 i32 i64 isize }
+
+macro_rules! check {
+    ($($e:expr),*) => {
+        $(assert!(thread::spawn({
+            move|| { $e; }
+        }).join().is_err());)*
+    }
+}
+
 fn main() {
-    assert!(thread::spawn(move|| { isize::min_value() / -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i8::min_value() / -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i16::min_value() / -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i32::min_value() / -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i64::min_value() / -1; }).join().is_err());
-    assert!(thread::spawn(move|| { 1isize / isize::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i8 / i8::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i16 / i16::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i32 / i32::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i64 / i64::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { isize::min_value() % -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i8::min_value() % -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i16::min_value() % -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i32::min_value() % -1; }).join().is_err());
-    assert!(thread::spawn(move|| { i64::min_value() % -1; }).join().is_err());
-    assert!(thread::spawn(move|| { 1isize % isize::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i8 % i8::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i16 % i16::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i32 % i32::zero(); }).join().is_err());
-    assert!(thread::spawn(move|| { 1i64 % i64::zero(); }).join().is_err());
+    check![
+        isize::min_value() / -isize::one(),
+        i8::min_value() / -i8::one(),
+        i16::min_value() / -i16::one(),
+        i32::min_value() / -i32::one(),
+        i64::min_value() / -i64::one(),
+        1isize / isize::zero(),
+        1i8 / i8::zero(),
+        1i16 / i16::zero(),
+        1i32 / i32::zero(),
+        1i64 / i64::zero(),
+        isize::min_value() % -isize::one(),
+        i8::min_value() % -i8::one(),
+        i16::min_value() % -i16::one(),
+        i32::min_value() % -i32::one(),
+        i64::min_value() % -i64::one(),
+        1isize % isize::zero(),
+        1i8 % i8::zero(),
+        1i16 % i16::zero(),
+        1i32 % i32::zero(),
+        1i64 % i64::zero()
+    ];
 }

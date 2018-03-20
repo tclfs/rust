@@ -10,21 +10,16 @@
 
 #![feature(optin_builtin_traits)]
 
-trait MyTrait {}
+auto trait MySafeTrait {}
 
-impl MyTrait for .. {}
+struct Foo;
 
-impl MyTrait for .. {}
-//~^ ERROR redundant default implementations of trait `MyTrait`
-
-trait MySafeTrait {}
-
-unsafe impl MySafeTrait for .. {}
+unsafe impl MySafeTrait for Foo {}
 //~^ ERROR implementing the trait `MySafeTrait` is not unsafe
 
-unsafe trait MyUnsafeTrait {}
+unsafe auto trait MyUnsafeTrait {}
 
-impl MyUnsafeTrait for .. {}
+impl MyUnsafeTrait for Foo {}
 //~^ ERROR the trait `MyUnsafeTrait` requires an `unsafe impl` declaration
 
 fn main() {}

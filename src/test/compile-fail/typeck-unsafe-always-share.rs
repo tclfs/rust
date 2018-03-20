@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Verify that UnsafeCell is *always* sync regardless if `T` is sync.
+// Verify that UnsafeCell is *always* !Sync regardless if `T` is sync.
 
 #![feature(optin_builtin_traits)]
 
@@ -27,16 +27,16 @@ fn test<T: Sync>(s: T) {}
 fn main() {
     let us = UnsafeCell::new(MySync{u: UnsafeCell::new(0)});
     test(us);
-    //~^ ERROR `core::marker::Sync` is not implemented
+    //~^ ERROR `std::cell::UnsafeCell<MySync<{integer}>>` cannot be shared between threads safely
 
     let uns = UnsafeCell::new(NoSync);
     test(uns);
-    //~^ ERROR `core::marker::Sync` is not implemented
+    //~^ ERROR `std::cell::UnsafeCell<NoSync>` cannot be shared between threads safely [E0277]
 
     let ms = MySync{u: uns};
     test(ms);
-    //~^ ERROR `core::marker::Sync` is not implemented
+    //~^ ERROR `std::cell::UnsafeCell<NoSync>` cannot be shared between threads safely [E0277]
 
     test(NoSync);
-    //~^ ERROR `core::marker::Sync` is not implemented
+    //~^ ERROR `NoSync` cannot be shared between threads safely [E0277]
 }

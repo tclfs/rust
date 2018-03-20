@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
+
 // Previously libstd would set stdio descriptors of a child process
 // by `dup`ing the requested descriptors to inherit directly into the
 // stdio descriptors. This, however, would incorrectly handle cases
@@ -67,8 +70,8 @@ fn main() {
         Command::new(name)
             .arg("--child")
             .stdin(Stdio::inherit())
-            .stdout(unsafe { FromRawFd::from_raw_fd(libc::STDERR_FILENO) })
-            .stderr(unsafe { FromRawFd::from_raw_fd(libc::STDOUT_FILENO) })
+            .stdout(unsafe { Stdio::from_raw_fd(libc::STDERR_FILENO) })
+            .stderr(unsafe { Stdio::from_raw_fd(libc::STDOUT_FILENO) })
             .spawn()
     };
 

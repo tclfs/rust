@@ -20,21 +20,31 @@
 //! To define a plugin, build a dylib crate with a
 //! `#[plugin_registrar]` function:
 //!
-//! ```rust,ignore
+//! ```no_run
 //! #![crate_name = "myplugin"]
 //! #![crate_type = "dylib"]
 //! #![feature(plugin_registrar)]
+//! #![feature(rustc_private)]
 //!
-//! extern crate rustc;
+//! extern crate rustc_plugin;
+//! extern crate syntax;
+//! extern crate syntax_pos;
 //!
-//! use rustc::plugin::Registry;
+//! use rustc_plugin::Registry;
+//! use syntax::ext::base::{ExtCtxt, MacResult};
+//! use syntax_pos::Span;
+//! use syntax::tokenstream::TokenTree;
 //!
 //! #[plugin_registrar]
 //! pub fn plugin_registrar(reg: &mut Registry) {
 //!     reg.register_macro("mymacro", expand_mymacro);
 //! }
 //!
-//! fn expand_mymacro(...) {  // details elided
+//! fn expand_mymacro(cx: &mut ExtCtxt, span: Span, tt: &[TokenTree]) -> Box<MacResult> {
+//!     unimplemented!()
+//! }
+//!
+//! # fn main() {}
 //! ```
 //!
 //! WARNING: We currently don't check that the registrar function
@@ -47,35 +57,29 @@
 //! #![plugin(myplugin)]
 //! ```
 //!
-//! See the [Plugins Chapter](../../book/compiler-plugins.html) of the book
-//! for more examples.
+//! See the [`plugin` feature](../unstable-book/language-features/plugin.html) of
+//! the Unstable Book for more examples.
 
-#![crate_name = "rustc_plugin"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
-#![feature(staged_api)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
+#![feature(staged_api)]
 
-#[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
 
 extern crate rustc;
-extern crate rustc_back;
-extern crate rustc_front;
 extern crate rustc_metadata;
-extern crate rustc_mir;
+extern crate syntax_pos;
+extern crate rustc_errors as errors;
 
 pub use self::registry::Registry;
 
-pub mod diagnostics;
+mod diagnostics;
 pub mod registry;
 pub mod load;
 pub mod build;
+
+__build_diagnostic_array! { librustc_plugin, DIAGNOSTICS }

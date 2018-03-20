@@ -8,14 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc_data_structures::fnv::FnvHashMap;
+use rustc_data_structures::fx::FxHashMap;
 use std::cell::RefCell;
-use std::ops::Index;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use util::common::MemoizationMap;
 
-use super::{DepNode, DepGraph};
+use super::{DepKind, DepNodeIndex, DepGraph};
 
 /// A DepTrackingMap offers a subset of the `Map` API and ensures that
 /// we make calls to `read` and `write` as appropriate. We key the
@@ -23,51 +22,22 @@ use super::{DepNode, DepGraph};
 pub struct DepTrackingMap<M: DepTrackingMapConfig> {
     phantom: PhantomData<M>,
     graph: DepGraph,
-    map: FnvHashMap<M::Key, M::Value>,
+    map: FxHashMap<M::Key, (M::Value, DepNodeIndex)>,
 }
 
 pub trait DepTrackingMapConfig {
     type Key: Eq + Hash + Clone;
     type Value: Clone;
-    fn to_dep_node(key: &Self::Key) -> DepNode;
+    fn to_dep_kind() -> DepKind;
 }
 
 impl<M: DepTrackingMapConfig> DepTrackingMap<M> {
     pub fn new(graph: DepGraph) -> DepTrackingMap<M> {
         DepTrackingMap {
             phantom: PhantomData,
-            graph: graph,
-            map: FnvHashMap()
+            graph,
+            map: FxHashMap(),
         }
-    }
-
-    /// Registers a (synthetic) read from the key `k`. Usually this
-    /// is invoked automatically by `get`.
-    fn read(&self, k: &M::Key) {
-        let dep_node = M::to_dep_node(k);
-        self.graph.read(dep_node);
-    }
-
-    /// Registers a (synthetic) write to the key `k`. Usually this is
-    /// invoked automatically by `insert`.
-    fn write(&self, k: &M::Key) {
-        let dep_node = M::to_dep_node(k);
-        self.graph.write(dep_node);
-    }
-
-    pub fn get(&self, k: &M::Key) -> Option<&M::Value> {
-        self.read(k);
-        self.map.get(k)
-    }
-
-    pub fn insert(&mut self, k: M::Key, v: M::Value) -> Option<M::Value> {
-        self.write(&k);
-        self.map.insert(k, v)
-    }
-
-    pub fn contains_key(&self, k: &M::Key) -> bool {
-        self.read(k);
-        self.map.contains_key(k)
     }
 }
 
@@ -86,19 +56,19 @@ impl<M: DepTrackingMapConfig> MemoizationMap for RefCell<DepTrackingMap<M>> {
     /// map; and `CurrentTask` represents the current task when
     /// `memoize` is invoked.
     ///
-    /// **Important:* when `op` is invoked, the current task will be
+    /// **Important:** when `op` is invoked, the current task will be
     /// switched to `Map(key)`. Therefore, if `op` makes use of any
     /// HIR nodes or shared state accessed through its closure
     /// environment, it must explicitly register a read of that
-    /// state. As an example, see `type_scheme_of_item` in `collect`,
+    /// state. As an example, see `type_of_item` in `collect`,
     /// which looks something like this:
     ///
     /// ```
-    /// fn type_scheme_of_item(..., item: &hir::Item) -> ty::TypeScheme<'tcx> {
-    ///     let item_def_id = ccx.tcx.map.local_def_id(it.id);
-    ///     ccx.tcx.tcache.memoized(item_def_id, || {
+    /// fn type_of_item(..., item: &hir::Item) -> Ty<'tcx> {
+    ///     let item_def_id = ccx.tcx.hir.local_def_id(it.id);
+    ///     ccx.tcx.item_types.memoized(item_def_id, || {
     ///         ccx.tcx.dep_graph.read(DepNode::Hir(item_def_id)); // (*)
-    ///         compute_type_scheme_of_item(ccx, item)
+    ///         compute_type_of_item(ccx, item)
     ///     });
     /// }
     /// ```
@@ -112,26 +82,16 @@ impl<M: DepTrackingMapConfig> MemoizationMap for RefCell<DepTrackingMap<M>> {
         let graph;
         {
             let this = self.borrow();
-            if let Some(result) = this.map.get(&key) {
-                this.read(&key);
+            if let Some(&(ref result, dep_node)) = this.map.get(&key) {
+                this.graph.read_index(dep_node);
                 return result.clone();
             }
             graph = this.graph.clone();
         }
 
-        let _task = graph.in_task(M::to_dep_node(&key));
-        let result = op();
-        self.borrow_mut().map.insert(key, result.clone());
+        let (result, dep_node) = graph.with_anon_task(M::to_dep_kind(), op);
+        self.borrow_mut().map.insert(key, (result.clone(), dep_node));
+        graph.read_index(dep_node);
         result
     }
 }
-
-impl<'k, M: DepTrackingMapConfig> Index<&'k M::Key> for DepTrackingMap<M> {
-    type Output = M::Value;
-
-    #[inline]
-    fn index(&self, k: &'k M::Key) -> &M::Value {
-        self.get(k).unwrap()
-    }
-}
-

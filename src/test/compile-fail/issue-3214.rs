@@ -10,13 +10,11 @@
 
 fn foo<T>() {
     struct foo {
-        x: T, //~ ERROR can't use type parameters from outer function;
-        //~^ ERROR type name `T` is undefined or not in scope
+        x: T, //~ ERROR can't use type parameters from outer function
     }
 
     impl<T> Drop for foo<T> {
         //~^ ERROR wrong number of type arguments
-        //~^^ ERROR the type parameter `T` is not constrained
         fn drop(&mut self) {}
     }
 }

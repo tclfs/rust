@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(lang_items, no_core)]
+#![feature(lang_items, no_core, optin_builtin_traits)]
 #![no_core]
 
 #[lang="copy"]
@@ -16,6 +16,9 @@ trait Copy { }
 
 #[lang="sized"]
 trait Sized { }
+
+#[lang = "freeze"]
+auto trait Freeze {}
 
 #[lang="start"]
 fn start(_main: *const u8, _argc: isize, _argv: *const *const u8) -> isize { 0 }

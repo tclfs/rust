@@ -29,7 +29,7 @@ showing the expected renderings.
 
 In order to avoid one-off dependencies for this task, this script uses
 a reasonably working HTML parser and the existing XPath implementation
-from Python 2's standard library. Hopefully we won't render
+from Python's standard library. Hopefully we won't render
 non-well-formed HTML.
 
 # Commands
@@ -99,6 +99,8 @@ There are a number of supported commands:
 * `@count PATH XPATH COUNT' checks for the occurrence of given XPath
   in the given file. The number of occurrences must match the given count.
 
+* `@has-dir PATH` checks for the existence of the given directory.
+
 All conditions can be negated with `!`. `@!has foo/type.NoSuch.html`
 checks if the given file does not exist, for example.
 
@@ -110,18 +112,30 @@ import os.path
 import re
 import shlex
 from collections import namedtuple
-from HTMLParser import HTMLParser
+try:
+    from html.parser import HTMLParser
+except ImportError:
+    from HTMLParser import HTMLParser
 from xml.etree import cElementTree as ET
 
 # &larrb;/&rarrb; are not in HTML 4 but are in HTML 5
-from htmlentitydefs import entitydefs
+try:
+    from html.entities import entitydefs
+except ImportError:
+    from htmlentitydefs import entitydefs
 entitydefs['larrb'] = u'\u21e4'
 entitydefs['rarrb'] = u'\u21e5'
+entitydefs['nbsp'] = ' '
 
 # "void elements" (no closing tag) from the HTML Standard section 12.1.2
 VOID_ELEMENTS = set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'keygen',
                      'link', 'menuitem', 'meta', 'param', 'source', 'track', 'wbr'])
 
+# Python 2 -> 3 compatibility
+try:
+    unichr
+except NameError:
+    unichr = chr
 
 class CustomHTMLParser(HTMLParser):
     """simplified HTML parser.
@@ -183,12 +197,8 @@ def concat_multi_lines(f):
 
         # strip the common prefix from the current line if needed
         if lastline is not None:
-            maxprefix = 0
-            for i in xrange(min(len(line), len(lastline))):
-                if line[i] != lastline[i]:
-                    break
-                maxprefix += 1
-            line = line[maxprefix:].lstrip()
+            common_prefix = os.path.commonprefix([line, lastline])
+            line = line[len(common_prefix):].lstrip()
 
         firstlineno = firstlineno or lineno
         if line.endswith('\\'):
@@ -212,7 +222,7 @@ LINE_PATTERN = re.compile(r'''
 
 
 def get_commands(template):
-    with open(template, 'rUb') as f:
+    with open(template, 'rU') as f:
         for lineno, line in concat_multi_lines(f):
             m = LINE_PATTERN.search(line)
             if not m:
@@ -300,6 +310,12 @@ class CachedFiles(object):
             self.trees[path] = tree
             return self.trees[path]
 
+    def get_dir(self, path):
+        path = self.resolve_path(path)
+        abspath = os.path.join(self.root, path)
+        if not(os.path.exists(abspath) and os.path.isdir(abspath)):
+            raise FailedCheck('Directory does not exist {!r}'.format(path))
+
 
 def check_string(data, pat, regexp):
     if not pat:
@@ -342,9 +358,9 @@ def check_tree_text(tree, path, pat, regexp):
     return ret
 
 
-def check_tree_count(tree, path, count):
+def get_tree_count(tree, path):
     path = normalize_xpath(path)
-    return len(tree.findall(path)) == count
+    return len(tree.findall(path))
 
 def stderr(*args):
     print(*args, file=sys.stderr)
@@ -371,7 +387,7 @@ def check_command(c, cache):
                     cache.get_file(c.args[0])
                     ret = True
                 except FailedCheck as err:
-                    cerr = err.message
+                    cerr = str(err)
                     ret = False
             elif len(c.args) == 2: # @has/matches <path> <pat> = string test
                 cerr = "`PATTERN` did not match"
@@ -393,7 +409,20 @@ def check_command(c, cache):
 
         elif c.cmd == 'count': # count test
             if len(c.args) == 3: # @count <path> <pat> <count> = count test
-                ret = check_tree_count(cache.get_tree(c.args[0]), c.args[1], int(c.args[2]))
+                expected = int(c.args[2])
+                found = get_tree_count(cache.get_tree(c.args[0]), c.args[1])
+                cerr = "Expected {} occurrences but found {}".format(expected, found)
+                ret = expected == found
+            else:
+                raise InvalidCheck('Invalid number of @{} arguments'.format(c.cmd))
+        elif c.cmd == 'has-dir': # has-dir test
+            if len(c.args) == 1: # @has-dir <path> = has-dir test
+                try:
+                    cache.get_dir(c.args[0])
+                    ret = True
+                except FailedCheck as err:
+                    cerr = str(err)
+                    ret = False
             else:
                 raise InvalidCheck('Invalid number of @{} arguments'.format(c.cmd))
         elif c.cmd == 'valid-html':
@@ -409,9 +438,9 @@ def check_command(c, cache):
 
     except FailedCheck as err:
         message = '@{}{} check failed'.format('!' if c.negated else '', c.cmd)
-        print_err(c.lineno, c.context, err.message, message)
+        print_err(c.lineno, c.context, str(err), message)
     except InvalidCheck as err:
-        print_err(c.lineno, c.context, err.message)
+        print_err(c.lineno, c.context, str(err))
 
 def check(target, commands):
     cache = CachedFiles(target)

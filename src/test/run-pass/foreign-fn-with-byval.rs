@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-wasm32-bare no libc to test ffi with
 
 #[derive(Copy, Clone)]
 pub struct S {
@@ -16,7 +17,7 @@ pub struct S {
     z: u64,
 }
 
-#[link(name = "rust_test_helpers")]
+#[link(name = "rust_test_helpers", kind = "static")]
 extern {
     pub fn get_x(x: S) -> u64;
     pub fn get_y(x: S) -> u64;

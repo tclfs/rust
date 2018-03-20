@@ -1,4 +1,5 @@
 {
+    "intrinsic_prefix": "_mm",
     "llvm_prefix": "llvm.x86.avx2.",
     "intrinsics": [
         {
@@ -173,7 +174,7 @@
             "intrinsic": "256_sad_epu8",
             "width": [256],
             "llvm": "psad.bw",
-            "ret": "u8",
+            "ret": "u64",
             "args": ["0", "0"]
         },
         {

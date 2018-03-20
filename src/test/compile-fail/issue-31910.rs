@@ -8,10 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(associated_consts)]
 
 enum Enum<T: Trait> {
-    X = Trait::Number, //~ ERROR constant evaluation error
+    X = Trait::Number,
+    //~^ ERROR mismatched types
+    //~| expected isize, found i32
 }
 
 trait Trait {

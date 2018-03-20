@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(unboxed_closures)]
+#![feature(fn_traits, unboxed_closures)]
 
 use std::ops::{Fn, FnMut, FnOnce};
 
@@ -67,7 +67,6 @@ fn f() {
     };
     let sp = &mut s;
     s(3);   //~ ERROR cannot borrow `s` as immutable because it is also borrowed as mutable
-    //~^ ERROR cannot borrow `s` as immutable because it is also borrowed as mutable
 }
 
 fn g() {

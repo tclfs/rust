@@ -12,16 +12,15 @@
 
 #![feature(optin_builtin_traits)]
 
-unsafe trait Trait {
-//~^ error: traits with default impls (`e.g. unsafe impl Trait for ..`) must have no methods or associated items
+unsafe auto trait Trait {
+//~^ ERROR E0380
     type Output;
 }
-
-unsafe impl Trait for .. {}
 
 fn call_method<T: Trait>(x: T) {}
 
 fn main() {
     // ICE
     call_method(());
+    //~^ ERROR
 }

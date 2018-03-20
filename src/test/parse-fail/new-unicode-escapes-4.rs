@@ -8,11 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: -Z parse-only
+// compile-flags: -Z parse-only -Z continue-parse-after-error
 
 pub fn main() {
     let s = "\u{lol}";
      //~^ ERROR invalid character in unicode escape: l
-     //~^^ ERROR invalid character in unicode escape: o
-     //~^^^ ERROR invalid character in unicode escape: l
 }

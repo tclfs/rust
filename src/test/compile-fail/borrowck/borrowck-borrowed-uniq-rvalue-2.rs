@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// error-pattern: borrowed value does not live long enough
+
 struct defer<'a> {
     x: &'a [&'a str],
 }
@@ -27,7 +29,6 @@ fn defer<'r>(x: &'r [&'r str]) -> defer<'r> {
 }
 
 fn main() {
-    let x = defer(&vec!("Goodbye", "world!"));
-    //~^ ERROR borrowed value does not live long enough
+    let x = defer(&vec!["Goodbye", "world!"]);
     x.x[0];
 }

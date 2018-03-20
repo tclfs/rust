@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
 use os::windows::prelude::*;
 
 use ffi::{CString, OsStr};
@@ -36,7 +35,7 @@ impl DynamicLibrary {
     }
 
     pub fn symbol(&self, symbol: &str) -> io::Result<usize> {
-        let symbol = try!(CString::new(symbol));
+        let symbol = CString::new(symbol)?;
         unsafe {
             match c::GetProcAddress(self.handle, symbol.as_ptr()) as usize {
                 0 => Err(io::Error::last_os_error()),

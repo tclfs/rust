@@ -16,11 +16,13 @@ use sys::c;
 use sys::cvt;
 use sys_common::mul_div_u64;
 use time::Duration;
+use convert::TryInto;
+use core::hash::{Hash, Hasher};
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 const INTERVALS_PER_SEC: u64 = NANOS_PER_SEC / 100;
 
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct Instant {
     t: c::LARGE_INTEGER,
 }
@@ -172,10 +174,18 @@ impl From<c::FILETIME> for SystemTime {
     }
 }
 
+impl Hash for SystemTime {
+    fn hash<H : Hasher>(&self, state: &mut H) {
+        self.intervals().hash(state)
+    }
+}
+
 fn dur2intervals(d: &Duration) -> i64 {
-    d.as_secs().checked_mul(INTERVALS_PER_SEC).and_then(|i| {
-        i.checked_add(d.subsec_nanos() as u64 / 100)
-    }).expect("overflow when converting duration to intervals") as i64
+    d.as_secs()
+        .checked_mul(INTERVALS_PER_SEC)
+        .and_then(|i| i.checked_add(d.subsec_nanos() as u64 / 100))
+        .and_then(|i| i.try_into().ok())
+        .expect("overflow when converting duration to intervals")
 }
 
 fn intervals2dur(intervals: u64) -> Duration {

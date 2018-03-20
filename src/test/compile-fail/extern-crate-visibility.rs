@@ -8,27 +8,27 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 mod foo {
     extern crate core;
 }
 
 // Check that private crates can be used from outside their modules, albeit with warnings
-use foo::core; //~ WARN extern crate `core` is private
-//~^ WARN this was previously accepted by the compiler but is being phased out
-use foo::core::cell; //~ WARN extern crate `core` is private
-//~^ WARN this was previously accepted by the compiler but is being phased out
+use foo::core::cell; //~ ERROR extern crate `core` is private
 
 fn f() {
-    foo::core::cell::Cell::new(0); //~ WARN extern crate `core` is private
-    //~^ WARN this was previously accepted by the compiler but is being phased out
+    foo::core::cell::Cell::new(0); //~ ERROR extern crate `core` is private
 
     use foo::*;
     mod core {} // Check that private crates are not glob imported
 }
 
-#[rustc_error]
-fn main() {} //~ ERROR compilation successful
+mod bar {
+    pub extern crate core;
+}
+
+mod baz {
+    pub use bar::*;
+    use self::core::cell; // Check that public extern crates are glob imported
+}
+
+fn main() {}

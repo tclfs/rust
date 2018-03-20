@@ -10,9 +10,7 @@
 
 #![feature(optin_builtin_traits)]
 
-trait MyTrait {}
-
-impl MyTrait for .. {}
+auto trait MyTrait {}
 
 struct MyS;
 
@@ -26,5 +24,5 @@ fn main() {
     is_mytrait::<MyS>();
 
     is_mytrait::<(MyS2, MyS)>();
-    //~^ ERROR the trait `MyTrait` is not implemented for the type `MyS2`
+    //~^ ERROR `MyS2: MyTrait` is not satisfied
 }

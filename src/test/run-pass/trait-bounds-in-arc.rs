@@ -12,11 +12,8 @@
 // and shared between threads as long as all types fulfill Send.
 
 // ignore-emscripten no threads support
-// ignore-pretty
-
 #![allow(unknown_features)]
 #![feature(box_syntax, std_misc)]
-#![feature(unboxed_closures)]
 
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -78,10 +75,10 @@ pub fn main() {
         swim_speed: 998,
         name: "alec_guinness".to_string(),
     };
-    let arc = Arc::new(vec!(box catte  as Box<Pet+Sync+Send>,
+    let arc = Arc::new(vec![box catte  as Box<Pet+Sync+Send>,
                             box dogge1 as Box<Pet+Sync+Send>,
                             box fishe  as Box<Pet+Sync+Send>,
-                            box dogge2 as Box<Pet+Sync+Send>));
+                            box dogge2 as Box<Pet+Sync+Send>]);
     let (tx1, rx1) = channel();
     let arc1 = arc.clone();
     let t1 = thread::spawn(move|| { check_legs(arc1); tx1.send(()); });
@@ -108,7 +105,6 @@ fn check_legs(arc: Arc<Vec<Box<Pet+Sync+Send>>>) {
 }
 fn check_names(arc: Arc<Vec<Box<Pet+Sync+Send>>>) {
     for pet in arc.iter() {
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         pet.name(Box::new(|name| {
             assert!(name.as_bytes()[0] == 'a' as u8 && name.as_bytes()[1] == 'l' as u8);
         }))

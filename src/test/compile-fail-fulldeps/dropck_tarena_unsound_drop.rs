@@ -19,6 +19,8 @@
 // (Also compare against dropck_tarena_cycle_checked.rs, from which
 // this was reduced to better understand its error message.)
 
+#![feature(rustc_private)]
+
 extern crate arena;
 
 use arena::TypedArena;
@@ -46,5 +48,6 @@ fn f<'a>(_arena: &'a TypedArena<C<'a>>) {}
 
 fn main() {
     let arena: TypedArena<C> = TypedArena::new();
-    f(&arena); //~ ERROR `arena` does not live long enough
-}
+    f(&arena);
+} //~^ ERROR `arena` does not live long enough
+

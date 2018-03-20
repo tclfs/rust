@@ -21,38 +21,151 @@
 //! one that doesn't; the one that doesn't might get decent parallel
 //! build speedups.
 
-#![crate_name = "rustc_back"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![feature(box_syntax)]
 #![feature(const_fn)]
-#![feature(copy_from_slice)]
-#![feature(libc)]
-#![feature(rand)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(step_by)]
-#![cfg_attr(unix, feature(static_mutex))]
-#![cfg_attr(test, feature(test, rand))]
+#![feature(fs_read_write)]
 
 extern crate syntax;
-extern crate libc;
+extern crate rand;
 extern crate serialize;
-extern crate rustc_llvm;
-extern crate rustc_front;
 #[macro_use] extern crate log;
 
-pub mod abi;
-pub mod tempdir;
-pub mod rpath;
-pub mod sha2;
-pub mod svh;
+extern crate serialize as rustc_serialize; // used by deriving
+
 pub mod target;
-pub mod slice;
-pub mod dynamic_lib;
+
+use std::str::FromStr;
+
+use serialize::json::{Json, ToJson};
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash,
+         RustcEncodable, RustcDecodable)]
+pub enum LinkerFlavor {
+    Em,
+    Gcc,
+    Ld,
+    Msvc,
+    Lld(LldFlavor),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash,
+         RustcEncodable, RustcDecodable)]
+pub enum LldFlavor {
+    Wasm,
+    Ld64,
+    Ld,
+    Link,
+}
+
+impl ToJson for LinkerFlavor {
+    fn to_json(&self) -> Json {
+        self.desc().to_json()
+    }
+}
+macro_rules! flavor_mappings {
+    ($((($($flavor:tt)*), $string:expr),)*) => (
+        impl LinkerFlavor {
+            pub const fn one_of() -> &'static str {
+                concat!("one of: ", $($string, " ",)+)
+            }
+
+            pub fn from_str(s: &str) -> Option<Self> {
+                Some(match s {
+                    $($string => $($flavor)*,)+
+                    _ => return None,
+                })
+            }
+
+            pub fn desc(&self) -> &str {
+                match *self {
+                    $($($flavor)* => $string,)+
+                }
+            }
+        }
+    )
+}
+
+
+flavor_mappings! {
+    ((LinkerFlavor::Em), "em"),
+    ((LinkerFlavor::Gcc), "gcc"),
+    ((LinkerFlavor::Ld), "ld"),
+    ((LinkerFlavor::Msvc), "msvc"),
+    ((LinkerFlavor::Lld(LldFlavor::Wasm)), "wasm-ld"),
+    ((LinkerFlavor::Lld(LldFlavor::Ld64)), "ld64.lld"),
+    ((LinkerFlavor::Lld(LldFlavor::Ld)), "ld.lld"),
+    ((LinkerFlavor::Lld(LldFlavor::Link)), "lld-link"),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
+pub enum PanicStrategy {
+    Unwind,
+    Abort,
+}
+
+impl PanicStrategy {
+    pub fn desc(&self) -> &str {
+        match *self {
+            PanicStrategy::Unwind => "unwind",
+            PanicStrategy::Abort => "abort",
+        }
+    }
+}
+
+impl ToJson for PanicStrategy {
+    fn to_json(&self) -> Json {
+        match *self {
+            PanicStrategy::Abort => "abort".to_json(),
+            PanicStrategy::Unwind => "unwind".to_json(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
+pub enum RelroLevel {
+    Full,
+    Partial,
+    Off,
+    None,
+}
+
+impl RelroLevel {
+    pub fn desc(&self) -> &str {
+        match *self {
+            RelroLevel::Full => "full",
+            RelroLevel::Partial => "partial",
+            RelroLevel::Off => "off",
+            RelroLevel::None => "none",
+        }
+    }
+}
+
+impl FromStr for RelroLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<RelroLevel, ()> {
+        match s {
+            "full" => Ok(RelroLevel::Full),
+            "partial" => Ok(RelroLevel::Partial),
+            "off" => Ok(RelroLevel::Off),
+            "none" => Ok(RelroLevel::None),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ToJson for RelroLevel {
+    fn to_json(&self) -> Json {
+        match *self {
+            RelroLevel::Full => "full".to_json(),
+            RelroLevel::Partial => "partial".to_json(),
+            RelroLevel::Off => "off".to_json(),
+            RelroLevel::None => "None".to_json(),
+        }
+    }
+}

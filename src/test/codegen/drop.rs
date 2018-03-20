@@ -29,13 +29,15 @@ pub fn droppy() {
 // that's one new drop call per call to possibly_unwinding(), and finally 3 drop calls for the
 // regular function exit. We used to have problems with quadratic growths of drop calls in such
 // functions.
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK: call{{.*}}SomeUniqueName{{.*}}drop
-// CHECK-NOT: call{{.*}}SomeUniqueName{{.*}}drop
+// CHECK-NOT: invoke{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: call{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: call{{.*}}drop{{.*}}SomeUniqueName
+// CHECK-NOT: call{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: invoke{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: call{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: invoke{{.*}}drop{{.*}}SomeUniqueName
+// CHECK: call{{.*}}drop{{.*}}SomeUniqueName
+// CHECK-NOT: {{(call|invoke).*}}drop{{.*}}SomeUniqueName
 // The next line checks for the } that ends the function definition
 // CHECK-LABEL: {{^[}]}}
     let _s = SomeUniqueName;

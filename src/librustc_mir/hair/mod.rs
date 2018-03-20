@@ -14,26 +14,53 @@
 //! unit-tested and separated from the Rust source and compiler data
 //! structures.
 
-use rustc::mir::repr::{BinOp, BorrowKind, Field, Literal, Mutability, UnOp,
-    TypedConstVal};
-use rustc::middle::const_eval::ConstVal;
-use rustc::middle::def_id::DefId;
-use rustc::middle::region::CodeExtent;
-use rustc::middle::subst::Substs;
-use rustc::middle::ty::{self, AdtDef, ClosureSubsts, Region, Ty};
-use rustc_front::hir;
+use rustc::mir::{BinOp, BorrowKind, Field, Literal, UnOp};
+use rustc::hir::def_id::DefId;
+use rustc::middle::region;
+use rustc::ty::subst::Substs;
+use rustc::ty::{AdtDef, ClosureSubsts, Region, Ty, GeneratorInterior};
+use rustc::hir;
 use syntax::ast;
-use syntax::codemap::Span;
+use syntax_pos::Span;
 use self::cx::Cx;
 
 pub mod cx;
 
+pub mod pattern;
+pub use self::pattern::{BindingMode, Pattern, PatternKind, FieldPattern};
+
+#[derive(Copy, Clone, Debug)]
+pub enum LintLevel {
+    Inherited,
+    Explicit(ast::NodeId)
+}
+
+impl LintLevel {
+    pub fn is_explicit(self) -> bool {
+        match self {
+            LintLevel::Inherited => false,
+            LintLevel::Explicit(_) => true
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block<'tcx> {
-    pub extent: CodeExtent,
+    pub targeted_by_break: bool,
+    pub region_scope: region::Scope,
+    pub opt_destruction_scope: Option<region::Scope>,
     pub span: Span,
     pub stmts: Vec<StmtRef<'tcx>>,
     pub expr: Option<ExprRef<'tcx>>,
+    pub safety_mode: BlockSafety,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum BlockSafety {
+    Safe,
+    ExplicitUnsafe(ast::NodeId),
+    PushUnsafe,
+    PopUnsafe
 }
 
 #[derive(Clone, Debug)]
@@ -43,15 +70,15 @@ pub enum StmtRef<'tcx> {
 
 #[derive(Clone, Debug)]
 pub struct Stmt<'tcx> {
-    pub span: Span,
     pub kind: StmtKind<'tcx>,
+    pub opt_destruction_scope: Option<region::Scope>,
 }
 
 #[derive(Clone, Debug)]
 pub enum StmtKind<'tcx> {
     Expr {
         /// scope for this statement; may be used as lifetime of temporaries
-        scope: CodeExtent,
+        scope: region::Scope,
 
         /// expression being evaluated in this statement
         expr: ExprRef<'tcx>,
@@ -60,23 +87,26 @@ pub enum StmtKind<'tcx> {
     Let {
         /// scope for variables bound in this let; covers this and
         /// remaining statements in block
-        remainder_scope: CodeExtent,
+        remainder_scope: region::Scope,
 
         /// scope for the initialization itself; might be used as
         /// lifetime of temporaries
-        init_scope: CodeExtent,
+        init_scope: region::Scope,
 
         /// let <PAT> = ...
         pattern: Pattern<'tcx>,
 
         /// let pat = <INIT> ...
-        initializer: Option<ExprRef<'tcx>>
+        initializer: Option<ExprRef<'tcx>>,
+
+        /// the lint level for this let-statement
+        lint_level: LintLevel,
     },
 }
 
 /// The Hair trait implementor translates their expressions (`&'tcx H::Expr`)
 /// into instances of this `Expr` enum. This translation can be done
-/// basically as lazilly or as eagerly as desired: every recursive
+/// basically as lazily or as eagerly as desired: every recursive
 /// reference to an expression in this enum is an `ExprRef<'tcx>`, which
 /// may in turn be another instance of this enum (boxed), or else an
 /// untranslated `&'tcx H::Expr`. Note that instances of `Expr` are very
@@ -95,7 +125,7 @@ pub struct Expr<'tcx> {
 
     /// lifetime of this expression if it should be spilled into a
     /// temporary; should be None only if in a constant context
-    pub temp_lifetime: Option<CodeExtent>,
+    pub temp_lifetime: Option<region::Scope>,
 
     /// span of the expression in the source
     pub span: Span,
@@ -107,15 +137,15 @@ pub struct Expr<'tcx> {
 #[derive(Clone, Debug)]
 pub enum ExprKind<'tcx> {
     Scope {
-        extent: CodeExtent,
+        region_scope: region::Scope,
+        lint_level: LintLevel,
         value: ExprRef<'tcx>,
     },
     Box {
         value: ExprRef<'tcx>,
-        value_extents: CodeExtent,
     },
     Call {
-        ty: ty::Ty<'tcx>,
+        ty: Ty<'tcx>,
         fun: ExprRef<'tcx>,
         args: Vec<ExprRef<'tcx>>,
     },
@@ -131,7 +161,8 @@ pub enum ExprKind<'tcx> {
         op: LogicalOp,
         lhs: ExprRef<'tcx>,
         rhs: ExprRef<'tcx>,
-    },
+    }, // NOT overloaded!
+       // LogicalOp is distinct from BinaryOp because of lazy evaluation of the operands.
     Unary {
         op: UnOp,
         arg: ExprRef<'tcx>,
@@ -139,7 +170,16 @@ pub enum ExprKind<'tcx> {
     Cast {
         source: ExprRef<'tcx>,
     },
+    Use {
+        source: ExprRef<'tcx>,
+    }, // Use a lexpr to get a vexpr.
+    NeverToAny {
+        source: ExprRef<'tcx>,
+    },
     ReifyFnPointer {
+        source: ExprRef<'tcx>,
+    },
+    ClosureFnPointer {
         source: ExprRef<'tcx>,
     },
     UnsafeFnPointer {
@@ -190,31 +230,32 @@ pub enum ExprKind<'tcx> {
         id: DefId,
     },
     Borrow {
-        region: Region,
+        region: Region<'tcx>,
         borrow_kind: BorrowKind,
         arg: ExprRef<'tcx>,
     },
     Break {
-        label: Option<CodeExtent>,
+        label: region::Scope,
+        value: Option<ExprRef<'tcx>>,
     },
     Continue {
-        label: Option<CodeExtent>,
+        label: region::Scope,
     },
     Return {
         value: Option<ExprRef<'tcx>>,
     },
     Repeat {
         value: ExprRef<'tcx>,
-        count: TypedConstVal<'tcx>,
+        count: u64,
     },
-    Vec {
+    Array {
         fields: Vec<ExprRef<'tcx>>,
     },
     Tuple {
         fields: Vec<ExprRef<'tcx>>,
     },
     Adt {
-        adt_def: AdtDef<'tcx>,
+        adt_def: &'tcx AdtDef,
         variant_index: usize,
         substs: &'tcx Substs<'tcx>,
         fields: Vec<FieldExprRef<'tcx>>,
@@ -222,14 +263,20 @@ pub enum ExprKind<'tcx> {
     },
     Closure {
         closure_id: DefId,
-        substs: &'tcx ClosureSubsts<'tcx>,
+        substs: ClosureSubsts<'tcx>,
         upvars: Vec<ExprRef<'tcx>>,
+        interior: Option<GeneratorInterior<'tcx>>,
     },
     Literal {
         literal: Literal<'tcx>,
     },
     InlineAsm {
         asm: &'tcx hir::InlineAsm,
+        outputs: Vec<ExprRef<'tcx>>,
+        inputs: Vec<ExprRef<'tcx>>
+    },
+    Yield {
+        value: ExprRef<'tcx>,
     },
 }
 
@@ -256,86 +303,13 @@ pub struct Arm<'tcx> {
     pub patterns: Vec<Pattern<'tcx>>,
     pub guard: Option<ExprRef<'tcx>>,
     pub body: ExprRef<'tcx>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Pattern<'tcx> {
-    pub ty: Ty<'tcx>,
-    pub span: Span,
-    pub kind: Box<PatternKind<'tcx>>,
+    pub lint_level: LintLevel,
 }
 
 #[derive(Copy, Clone, Debug)]
 pub enum LogicalOp {
     And,
     Or,
-}
-
-#[derive(Clone, Debug)]
-pub enum PatternKind<'tcx> {
-    Wild,
-
-    /// x, ref x, x @ P, etc
-    Binding {
-        mutability: Mutability,
-        name: ast::Name,
-        mode: BindingMode,
-        var: ast::NodeId,
-        ty: Ty<'tcx>,
-        subpattern: Option<Pattern<'tcx>>,
-    },
-
-    /// Foo(...) or Foo{...} or Foo, where `Foo` is a variant name from an adt with >1 variants
-    Variant {
-        adt_def: AdtDef<'tcx>,
-        variant_index: usize,
-        subpatterns: Vec<FieldPattern<'tcx>>,
-    },
-
-    /// (...), Foo(...), Foo{...}, or Foo, where `Foo` is a variant name from an adt with 1 variant
-    Leaf {
-        subpatterns: Vec<FieldPattern<'tcx>>,
-    },
-
-    /// box P, &P, &mut P, etc
-    Deref {
-        subpattern: Pattern<'tcx>,
-    },
-
-    Constant {
-        value: ConstVal,
-    },
-
-    Range {
-        lo: Literal<'tcx>,
-        hi: Literal<'tcx>,
-    },
-
-    /// matches against a slice, checking the length and extracting elements
-    Slice {
-        prefix: Vec<Pattern<'tcx>>,
-        slice: Option<Pattern<'tcx>>,
-        suffix: Vec<Pattern<'tcx>>,
-    },
-
-    /// fixed match against an array, irrefutable
-    Array {
-        prefix: Vec<Pattern<'tcx>>,
-        slice: Option<Pattern<'tcx>>,
-        suffix: Vec<Pattern<'tcx>>,
-    },
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum BindingMode {
-    ByValue,
-    ByRef(Region, BorrowKind),
-}
-
-#[derive(Clone, Debug)]
-pub struct FieldPattern<'tcx> {
-    pub field: Field,
-    pub pattern: Pattern<'tcx>,
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -356,13 +330,13 @@ pub struct FieldPattern<'tcx> {
 pub trait Mirror<'tcx> {
     type Output;
 
-    fn make_mirror<'a>(self, cx: &mut Cx<'a, 'tcx>) -> Self::Output;
+    fn make_mirror<'a, 'gcx>(self, cx: &mut Cx<'a, 'gcx, 'tcx>) -> Self::Output;
 }
 
 impl<'tcx> Mirror<'tcx> for Expr<'tcx> {
     type Output = Expr<'tcx>;
 
-    fn make_mirror<'a>(self, _: &mut Cx<'a, 'tcx>) -> Expr<'tcx> {
+    fn make_mirror<'a, 'gcx>(self, _: &mut Cx<'a, 'gcx, 'tcx>) -> Expr<'tcx> {
         self
     }
 }
@@ -370,7 +344,7 @@ impl<'tcx> Mirror<'tcx> for Expr<'tcx> {
 impl<'tcx> Mirror<'tcx> for ExprRef<'tcx> {
     type Output = Expr<'tcx>;
 
-    fn make_mirror<'a>(self, hir: &mut Cx<'a, 'tcx>) -> Expr<'tcx> {
+    fn make_mirror<'a, 'gcx>(self, hir: &mut Cx<'a, 'gcx, 'tcx>) -> Expr<'tcx> {
         match self {
             ExprRef::Hair(h) => h.make_mirror(hir),
             ExprRef::Mirror(m) => *m,
@@ -381,7 +355,7 @@ impl<'tcx> Mirror<'tcx> for ExprRef<'tcx> {
 impl<'tcx> Mirror<'tcx> for Stmt<'tcx> {
     type Output = Stmt<'tcx>;
 
-    fn make_mirror<'a>(self, _: &mut Cx<'a, 'tcx>) -> Stmt<'tcx> {
+    fn make_mirror<'a, 'gcx>(self, _: &mut Cx<'a, 'gcx, 'tcx>) -> Stmt<'tcx> {
         self
     }
 }
@@ -389,7 +363,7 @@ impl<'tcx> Mirror<'tcx> for Stmt<'tcx> {
 impl<'tcx> Mirror<'tcx> for StmtRef<'tcx> {
     type Output = Stmt<'tcx>;
 
-    fn make_mirror<'a>(self, _: &mut Cx<'a,'tcx>) -> Stmt<'tcx> {
+    fn make_mirror<'a, 'gcx>(self, _: &mut Cx<'a, 'gcx, 'tcx>) -> Stmt<'tcx> {
         match self {
             StmtRef::Mirror(m) => *m,
         }
@@ -399,7 +373,7 @@ impl<'tcx> Mirror<'tcx> for StmtRef<'tcx> {
 impl<'tcx> Mirror<'tcx> for Block<'tcx> {
     type Output = Block<'tcx>;
 
-    fn make_mirror<'a>(self, _: &mut Cx<'a, 'tcx>) -> Block<'tcx> {
+    fn make_mirror<'a, 'gcx>(self, _: &mut Cx<'a, 'gcx, 'tcx>) -> Block<'tcx> {
         self
     }
 }

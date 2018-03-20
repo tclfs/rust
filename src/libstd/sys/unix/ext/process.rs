@@ -12,8 +12,6 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use prelude::v1::*;
-
 use io;
 use os::unix::io::{FromRawFd, RawFd, AsRawFd, IntoRawFd};
 use process;
@@ -34,19 +32,6 @@ pub trait CommandExt {
     #[stable(feature = "rust1", since = "1.0.0")]
     fn gid(&mut self, id: u32) -> &mut process::Command;
 
-    /// Create a new session (cf. `setsid(2)`) for the child process. This means
-    /// that the child is the leader of a new process group. The parent process
-    /// remains the child reaper of the new process.
-    ///
-    /// This is not enough to create a daemon process. The *init* process should
-    /// be the child reaper of a daemon. This can be achieved if the parent
-    /// process exit. Moreover, a daemon should not have a controlling terminal.
-    /// To achieve this, a session leader (the child) must spawn another process
-    /// (the daemon) in the same session.
-    #[unstable(feature = "process_session_leader", reason = "recently added",
-               issue = "27811")]
-    fn session_leader(&mut self, on: bool) -> &mut process::Command;
-
     /// Schedules a closure to be run just before the `exec` function is
     /// invoked.
     ///
@@ -62,7 +47,7 @@ pub trait CommandExt {
     /// # Notes
     ///
     /// This closure will be run in the context of the child process after a
-    /// `fork`. This primarily means that any modificatons made to memory on
+    /// `fork`. This primarily means that any modifications made to memory on
     /// behalf of this closure will **not** be visible to the parent process.
     /// This is often a very constrained environment where normal operations
     /// like `malloc` or acquiring a mutex are not guaranteed to work (due to
@@ -71,7 +56,7 @@ pub trait CommandExt {
     /// When this closure is run, aspects such as the stdio file descriptors and
     /// working directory have successfully been changed, so output to these
     /// locations may not appear where intended.
-    #[unstable(feature = "process_exec", issue = "31398")]
+    #[stable(feature = "process_exec", since = "1.15.0")]
     fn before_exec<F>(&mut self, f: F) -> &mut process::Command
         where F: FnMut() -> io::Result<()> + Send + Sync + 'static;
 
@@ -82,9 +67,19 @@ pub trait CommandExt {
     /// an error indicating why the exec (or another part of the setup of the
     /// `Command`) failed.
     ///
+    /// `exec` not returning has the same implications as calling
+    /// [`process::exit`] – no destructors on the current stack or any other
+    /// thread’s stack will be run. Therefore, it is recommended to only call
+    /// `exec` at a point where it is fine to not run any destructors. Note,
+    /// that the `execvp` syscall independently guarantees that all memory is
+    /// freed and all file descriptors with the `CLOEXEC` option (set by default
+    /// on all file descriptors opened by the standard library) are closed.
+    ///
     /// This function, unlike `spawn`, will **not** `fork` the process to create
     /// a new child. Like spawn, however, the default behavior for the stdio
     /// descriptors will be to inherited from the current process.
+    ///
+    /// [`process::exit`]: ../../../process/fn.exit.html
     ///
     /// # Notes
     ///
@@ -94,7 +89,7 @@ pub trait CommandExt {
     /// file descriptors may have changed. If a "transactional spawn" is
     /// required to gracefully handle errors it is recommended to use the
     /// cross-platform `spawn` instead.
-    #[unstable(feature = "process_exec", issue = "31398")]
+    #[stable(feature = "process_exec2", since = "1.9.0")]
     fn exec(&mut self) -> io::Error;
 }
 
@@ -107,11 +102,6 @@ impl CommandExt for process::Command {
 
     fn gid(&mut self, id: u32) -> &mut process::Command {
         self.as_inner_mut().gid(id);
-        self
-    }
-
-    fn session_leader(&mut self, on: bool) -> &mut process::Command {
-        self.as_inner_mut().session_leader(on);
         self
     }
 
@@ -130,6 +120,11 @@ impl CommandExt for process::Command {
 /// Unix-specific extensions to `std::process::ExitStatus`
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait ExitStatusExt {
+    /// Creates a new `ExitStatus` from the raw underlying `i32` return value of
+    /// a process.
+    #[stable(feature = "exit_status_from", since = "1.12.0")]
+    fn from_raw(raw: i32) -> Self;
+
     /// If the process was terminated by a signal, returns that signal.
     #[stable(feature = "rust1", since = "1.0.0")]
     fn signal(&self) -> Option<i32>;
@@ -137,6 +132,10 @@ pub trait ExitStatusExt {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ExitStatusExt for process::ExitStatus {
+    fn from_raw(raw: i32) -> Self {
+        process::ExitStatus::from_inner(From::from(raw))
+    }
+
     fn signal(&self) -> Option<i32> {
         self.as_inner().signal()
     }
@@ -172,23 +171,29 @@ impl AsRawFd for process::ChildStderr {
     }
 }
 
-#[stable(feature = "process_extensions", since = "1.2.0")]
+#[stable(feature = "into_raw_os", since = "1.4.0")]
 impl IntoRawFd for process::ChildStdin {
     fn into_raw_fd(self) -> RawFd {
         self.into_inner().into_fd().into_raw()
     }
 }
 
-#[stable(feature = "process_extensions", since = "1.2.0")]
+#[stable(feature = "into_raw_os", since = "1.4.0")]
 impl IntoRawFd for process::ChildStdout {
     fn into_raw_fd(self) -> RawFd {
         self.into_inner().into_fd().into_raw()
     }
 }
 
-#[stable(feature = "process_extensions", since = "1.2.0")]
+#[stable(feature = "into_raw_os", since = "1.4.0")]
 impl IntoRawFd for process::ChildStderr {
     fn into_raw_fd(self) -> RawFd {
         self.into_inner().into_fd().into_raw()
     }
+}
+
+/// Returns the OS-assigned process identifier associated with this process's parent.
+#[unstable(feature = "unix_ppid", issue = "46104")]
+pub fn parent_id() -> u32 {
+    ::sys::os::getppid()
 }

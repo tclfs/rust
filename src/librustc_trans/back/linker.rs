@@ -8,21 +8,88 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::ffi::OsString;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, BufWriter};
 use std::io::prelude::*;
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use back::archive;
-use middle::cstore::CrateStore;
-use middle::dependency_format::Linkage;
-use session::Session;
-use session::config::CrateTypeDylib;
-use session::config;
-use syntax::ast;
-use trans::CrateTranslation;
+use back::command::Command;
+use back::symbol_export;
+use rustc::hir::def_id::{LOCAL_CRATE, CrateNum};
+use rustc::middle::dependency_format::Linkage;
+use rustc::session::Session;
+use rustc::session::config::{self, CrateType, OptLevel, DebugInfoLevel};
+use rustc::ty::TyCtxt;
+use rustc_back::{LinkerFlavor, LldFlavor};
+use serialize::{json, Encoder};
+
+/// For all the linkers we support, and information they might
+/// need out of the shared crate context before we get rid of it.
+pub struct LinkerInfo {
+    exports: HashMap<CrateType, Vec<String>>,
+}
+
+impl LinkerInfo {
+    pub fn new(tcx: TyCtxt) -> LinkerInfo {
+        LinkerInfo {
+            exports: tcx.sess.crate_types.borrow().iter().map(|&c| {
+                (c, exported_symbols(tcx, c))
+            }).collect(),
+        }
+    }
+
+    pub fn to_linker<'a>(&'a self,
+                         cmd: Command,
+                         sess: &'a Session) -> Box<Linker+'a> {
+        match sess.linker_flavor() {
+            LinkerFlavor::Lld(LldFlavor::Link) |
+            LinkerFlavor::Msvc => {
+                Box::new(MsvcLinker {
+                    cmd,
+                    sess,
+                    info: self
+                }) as Box<Linker>
+            }
+            LinkerFlavor::Em =>  {
+                Box::new(EmLinker {
+                    cmd,
+                    sess,
+                    info: self
+                }) as Box<Linker>
+            }
+            LinkerFlavor::Gcc =>  {
+                Box::new(GccLinker {
+                    cmd,
+                    sess,
+                    info: self,
+                    hinted_static: false,
+                    is_ld: false,
+                }) as Box<Linker>
+            }
+
+            LinkerFlavor::Lld(LldFlavor::Ld) |
+            LinkerFlavor::Lld(LldFlavor::Ld64) |
+            LinkerFlavor::Ld => {
+                Box::new(GccLinker {
+                    cmd,
+                    sess,
+                    info: self,
+                    hinted_static: false,
+                    is_ld: true,
+                }) as Box<Linker>
+            }
+
+            LinkerFlavor::Lld(LldFlavor::Wasm) => {
+                Box::new(WasmLd {
+                    cmd,
+                }) as Box<Linker>
+            }
+        }
+    }
+}
 
 /// Linker abstraction used by back::link to build up the command to invoke a
 /// linker.
@@ -43,78 +110,135 @@ pub trait Linker {
     fn framework_path(&mut self, path: &Path);
     fn output_filename(&mut self, path: &Path);
     fn add_object(&mut self, path: &Path);
-    fn gc_sections(&mut self, is_dylib: bool);
+    fn gc_sections(&mut self, keep_metadata: bool);
     fn position_independent_executable(&mut self);
+    fn no_position_independent_executable(&mut self);
+    fn full_relro(&mut self);
+    fn partial_relro(&mut self);
+    fn no_relro(&mut self);
     fn optimize(&mut self);
     fn debuginfo(&mut self);
     fn no_default_libraries(&mut self);
     fn build_dylib(&mut self, out_filename: &Path);
+    fn build_static_executable(&mut self);
     fn args(&mut self, args: &[String]);
-    fn hint_static(&mut self);
-    fn hint_dynamic(&mut self);
-    fn whole_archives(&mut self);
-    fn no_whole_archives(&mut self);
-    fn export_symbols(&mut self, sess: &Session, trans: &CrateTranslation,
-                      tmpdir: &Path);
+    fn export_symbols(&mut self, tmpdir: &Path, crate_type: CrateType);
+    fn subsystem(&mut self, subsystem: &str);
+    // Should have been finalize(self), but we don't support self-by-value on trait objects (yet?).
+    fn finalize(&mut self) -> Command;
 }
 
-pub struct GnuLinker<'a> {
-    pub cmd: &'a mut Command,
-    pub sess: &'a Session,
+pub struct GccLinker<'a> {
+    cmd: Command,
+    sess: &'a Session,
+    info: &'a LinkerInfo,
+    hinted_static: bool, // Keeps track of the current hinting mode.
+    // Link as ld
+    is_ld: bool,
 }
 
-impl<'a> GnuLinker<'a> {
+impl<'a> GccLinker<'a> {
+    /// Argument that must be passed *directly* to the linker
+    ///
+    /// These arguments need to be prepended with '-Wl,' when a gcc-style linker is used
+    fn linker_arg<S>(&mut self, arg: S) -> &mut Self
+        where S: AsRef<OsStr>
+    {
+        if !self.is_ld {
+            let mut os = OsString::from("-Wl,");
+            os.push(arg.as_ref());
+            self.cmd.arg(os);
+        } else {
+            self.cmd.arg(arg);
+        }
+        self
+    }
+
     fn takes_hints(&self) -> bool {
         !self.sess.target.target.options.is_like_osx
     }
+
+    // Some platforms take hints about whether a library is static or dynamic.
+    // For those that support this, we ensure we pass the option if the library
+    // was flagged "static" (most defaults are dynamic) to ensure that if
+    // libfoo.a and libfoo.so both exist that the right one is chosen.
+    fn hint_static(&mut self) {
+        if !self.takes_hints() { return }
+        if !self.hinted_static {
+            self.linker_arg("-Bstatic");
+            self.hinted_static = true;
+        }
+    }
+
+    fn hint_dynamic(&mut self) {
+        if !self.takes_hints() { return }
+        if self.hinted_static {
+            self.linker_arg("-Bdynamic");
+            self.hinted_static = false;
+        }
+    }
 }
 
-impl<'a> Linker for GnuLinker<'a> {
-    fn link_dylib(&mut self, lib: &str) { self.cmd.arg("-l").arg(lib); }
-    fn link_staticlib(&mut self, lib: &str) { self.cmd.arg("-l").arg(lib); }
-    fn link_rlib(&mut self, lib: &Path) { self.cmd.arg(lib); }
+impl<'a> Linker for GccLinker<'a> {
+    fn link_dylib(&mut self, lib: &str) { self.hint_dynamic(); self.cmd.arg("-l").arg(lib); }
+    fn link_staticlib(&mut self, lib: &str) { self.hint_static(); self.cmd.arg("-l").arg(lib); }
+    fn link_rlib(&mut self, lib: &Path) { self.hint_static(); self.cmd.arg(lib); }
     fn include_path(&mut self, path: &Path) { self.cmd.arg("-L").arg(path); }
     fn framework_path(&mut self, path: &Path) { self.cmd.arg("-F").arg(path); }
     fn output_filename(&mut self, path: &Path) { self.cmd.arg("-o").arg(path); }
     fn add_object(&mut self, path: &Path) { self.cmd.arg(path); }
     fn position_independent_executable(&mut self) { self.cmd.arg("-pie"); }
+    fn no_position_independent_executable(&mut self) { self.cmd.arg("-no-pie"); }
+    fn full_relro(&mut self) { self.linker_arg("-z,relro,-z,now"); }
+    fn partial_relro(&mut self) { self.linker_arg("-z,relro"); }
+    fn no_relro(&mut self) { self.linker_arg("-z,norelro"); }
+    fn build_static_executable(&mut self) { self.cmd.arg("-static"); }
     fn args(&mut self, args: &[String]) { self.cmd.args(args); }
 
     fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+        self.hint_dynamic();
         self.cmd.arg("-l").arg(lib);
     }
 
     fn link_framework(&mut self, framework: &str) {
+        self.hint_dynamic();
         self.cmd.arg("-framework").arg(framework);
     }
 
+    // Here we explicitly ask that the entire archive is included into the
+    // result artifact. For more details see #15460, but the gist is that
+    // the linker will strip away any unused objects in the archive if we
+    // don't otherwise explicitly reference them. This can occur for
+    // libraries which are just providing bindings, libraries with generic
+    // functions, etc.
     fn link_whole_staticlib(&mut self, lib: &str, search_path: &[PathBuf]) {
+        self.hint_static();
         let target = &self.sess.target.target;
         if !target.options.is_like_osx {
-            self.cmd.arg("-Wl,--whole-archive")
-                    .arg("-l").arg(lib)
-                    .arg("-Wl,--no-whole-archive");
+            self.linker_arg("--whole-archive").cmd.arg("-l").arg(lib);
+            self.linker_arg("--no-whole-archive");
         } else {
-            // -force_load is the OSX equivalent of --whole-archive, but it
+            // -force_load is the macOS equivalent of --whole-archive, but it
             // involves passing the full path to the library to link.
-            let mut v = OsString::from("-Wl,-force_load,");
+            let mut v = OsString::from("-force_load,");
             v.push(&archive::find_library(lib, search_path, &self.sess));
-            self.cmd.arg(&v);
+            self.linker_arg(&v);
         }
     }
 
     fn link_whole_rlib(&mut self, lib: &Path) {
+        self.hint_static();
         if self.sess.target.target.options.is_like_osx {
-            let mut v = OsString::from("-Wl,-force_load,");
+            let mut v = OsString::from("-force_load,");
             v.push(lib);
-            self.cmd.arg(&v);
+            self.linker_arg(&v);
         } else {
-            self.cmd.arg("-Wl,--whole-archive").arg(lib)
-                    .arg("-Wl,--no-whole-archive");
+            self.linker_arg("--whole-archive").cmd.arg(lib);
+            self.linker_arg("--no-whole-archive");
         }
     }
 
-    fn gc_sections(&mut self, is_dylib: bool) {
+    fn gc_sections(&mut self, keep_metadata: bool) {
         // The dead_strip option to the linker specifies that functions and data
         // unreachable by the entry point will be removed. This is quite useful
         // with Rust's compilation model of compiling libraries at a time into
@@ -130,18 +254,18 @@ impl<'a> Linker for GnuLinker<'a> {
         // for partial linking when using multiple codegen units (-r).  So we
         // insert it here.
         if self.sess.target.target.options.is_like_osx {
-            self.cmd.arg("-Wl,-dead_strip");
+            self.linker_arg("-dead_strip");
         } else if self.sess.target.target.options.is_like_solaris {
-            self.cmd.arg("-Wl,-z");
-            self.cmd.arg("-Wl,ignore");
+            self.linker_arg("-z");
+            self.linker_arg("ignore");
 
         // If we're building a dylib, we don't use --gc-sections because LLVM
         // has already done the best it can do, and we also don't want to
         // eliminate the metadata. If we're building an executable, however,
         // --gc-sections drops the size of hello world from 1.8MB to 597K, a 67%
         // reduction.
-        } else if !is_dylib {
-            self.cmd.arg("-Wl,--gc-sections");
+        } else if !keep_metadata {
+            self.linker_arg("--gc-sections");
         }
     }
 
@@ -152,7 +276,7 @@ impl<'a> Linker for GnuLinker<'a> {
         // need a numeric argument, but other linkers do.
         if self.sess.opts.optimize == config::OptLevel::Default ||
            self.sess.opts.optimize == config::OptLevel::Aggressive {
-            self.cmd.arg("-Wl,-O1");
+            self.linker_arg("-O1");
         }
     }
 
@@ -161,52 +285,117 @@ impl<'a> Linker for GnuLinker<'a> {
     }
 
     fn no_default_libraries(&mut self) {
-        self.cmd.arg("-nodefaultlibs");
+        if !self.is_ld {
+            self.cmd.arg("-nodefaultlibs");
+        }
     }
 
     fn build_dylib(&mut self, out_filename: &Path) {
         // On mac we need to tell the linker to let this library be rpathed
         if self.sess.target.target.options.is_like_osx {
-            self.cmd.args(&["-dynamiclib", "-Wl,-dylib"]);
+            self.cmd.arg("-dynamiclib");
+            self.linker_arg("-dylib");
 
-            if self.sess.opts.cg.rpath {
-                let mut v = OsString::from("-Wl,-install_name,@rpath/");
+            // Note that the `osx_rpath_install_name` option here is a hack
+            // purely to support rustbuild right now, we should get a more
+            // principled solution at some point to force the compiler to pass
+            // the right `-Wl,-install_name` with an `@rpath` in it.
+            if self.sess.opts.cg.rpath ||
+               self.sess.opts.debugging_opts.osx_rpath_install_name {
+                let mut v = OsString::from("-install_name,@rpath/");
                 v.push(out_filename.file_name().unwrap());
-                self.cmd.arg(&v);
+                self.linker_arg(&v);
             }
         } else {
             self.cmd.arg("-shared");
         }
     }
 
-    fn whole_archives(&mut self) {
-        if !self.takes_hints() { return }
-        self.cmd.arg("-Wl,--whole-archive");
+    fn export_symbols(&mut self, tmpdir: &Path, crate_type: CrateType) {
+        // If we're compiling a dylib, then we let symbol visibility in object
+        // files to take care of whether they're exported or not.
+        //
+        // If we're compiling a cdylib, however, we manually create a list of
+        // exported symbols to ensure we don't expose any more. The object files
+        // have far more public symbols than we actually want to export, so we
+        // hide them all here.
+        if crate_type == CrateType::CrateTypeDylib ||
+           crate_type == CrateType::CrateTypeProcMacro {
+            return
+        }
+
+        let mut arg = OsString::new();
+        let path = tmpdir.join("list");
+
+        debug!("EXPORTED SYMBOLS:");
+
+        if self.sess.target.target.options.is_like_osx {
+            // Write a plain, newline-separated list of symbols
+            let res = (|| -> io::Result<()> {
+                let mut f = BufWriter::new(File::create(&path)?);
+                for sym in self.info.exports[&crate_type].iter() {
+                    debug!("  _{}", sym);
+                    writeln!(f, "_{}", sym)?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = res {
+                self.sess.fatal(&format!("failed to write lib.def file: {}", e));
+            }
+        } else {
+            // Write an LD version script
+            let res = (|| -> io::Result<()> {
+                let mut f = BufWriter::new(File::create(&path)?);
+                writeln!(f, "{{\n  global:")?;
+                for sym in self.info.exports[&crate_type].iter() {
+                    debug!("    {};", sym);
+                    writeln!(f, "    {};", sym)?;
+                }
+                writeln!(f, "\n  local:\n    *;\n}};")?;
+                Ok(())
+            })();
+            if let Err(e) = res {
+                self.sess.fatal(&format!("failed to write version script: {}", e));
+            }
+        }
+
+        if self.sess.target.target.options.is_like_osx {
+            if !self.is_ld {
+                arg.push("-Wl,")
+            }
+            arg.push("-exported_symbols_list,");
+        } else if self.sess.target.target.options.is_like_solaris {
+            if !self.is_ld {
+                arg.push("-Wl,")
+            }
+            arg.push("-M,");
+        } else {
+            if !self.is_ld {
+                arg.push("-Wl,")
+            }
+            arg.push("--version-script=");
+        }
+
+        arg.push(&path);
+        self.cmd.arg(arg);
     }
 
-    fn no_whole_archives(&mut self) {
-        if !self.takes_hints() { return }
-        self.cmd.arg("-Wl,--no-whole-archive");
+    fn subsystem(&mut self, subsystem: &str) {
+        self.linker_arg(&format!("--subsystem,{}", subsystem));
     }
 
-    fn hint_static(&mut self) {
-        if !self.takes_hints() { return }
-        self.cmd.arg("-Wl,-Bstatic");
-    }
-
-    fn hint_dynamic(&mut self) {
-        if !self.takes_hints() { return }
-        self.cmd.arg("-Wl,-Bdynamic");
-    }
-
-    fn export_symbols(&mut self, _: &Session, _: &CrateTranslation, _: &Path) {
-        // noop, visibility in object files takes care of this
+    fn finalize(&mut self) -> Command {
+        self.hint_dynamic(); // Reset to default before returning the composed command line.
+        let mut cmd = Command::new("");
+        ::std::mem::swap(&mut cmd, &mut self.cmd);
+        cmd
     }
 }
 
 pub struct MsvcLinker<'a> {
-    pub cmd: &'a mut Command,
-    pub sess: &'a Session,
+    cmd: Command,
+    sess: &'a Session,
+    info: &'a LinkerInfo
 }
 
 impl<'a> Linker for MsvcLinker<'a> {
@@ -221,7 +410,22 @@ impl<'a> Linker for MsvcLinker<'a> {
         self.cmd.arg(arg);
     }
 
-    fn gc_sections(&mut self, _is_dylib: bool) { self.cmd.arg("/OPT:REF,ICF"); }
+    fn build_static_executable(&mut self) {
+        // noop
+    }
+
+    fn gc_sections(&mut self, _keep_metadata: bool) {
+        // MSVC's ICF (Identical COMDAT Folding) link optimization is
+        // slow for Rust and thus we disable it by default when not in
+        // optimization build.
+        if self.sess.opts.optimize != config::OptLevel::No {
+            self.cmd.arg("/OPT:REF,ICF");
+        } else {
+            // It is necessary to specify NOICF here, because /OPT:REF
+            // implies ICF by default.
+            self.cmd.arg("/OPT:REF,NOICF");
+        }
+    }
 
     fn link_dylib(&mut self, lib: &str) {
         self.cmd.arg(&format!("{}.lib", lib));
@@ -243,6 +447,22 @@ impl<'a> Linker for MsvcLinker<'a> {
     }
 
     fn position_independent_executable(&mut self) {
+        // noop
+    }
+
+    fn no_position_independent_executable(&mut self) {
+        // noop
+    }
+
+    fn full_relro(&mut self) {
+        // noop
+    }
+
+    fn partial_relro(&mut self) {
+        // noop
+    }
+
+    fn no_relro(&mut self) {
         // noop
     }
 
@@ -271,10 +491,10 @@ impl<'a> Linker for MsvcLinker<'a> {
     }
 
     fn framework_path(&mut self, _path: &Path) {
-        panic!("frameworks are not supported on windows")
+        bug!("frameworks are not supported on windows")
     }
     fn link_framework(&mut self, _framework: &str) {
-        panic!("frameworks are not supported on windows")
+        bug!("frameworks are not supported on windows")
     }
 
     fn link_whole_staticlib(&mut self, lib: &str, _search_path: &[PathBuf]) {
@@ -293,23 +513,40 @@ impl<'a> Linker for MsvcLinker<'a> {
         // This will cause the Microsoft linker to generate a PDB file
         // from the CodeView line tables in the object files.
         self.cmd.arg("/DEBUG");
-    }
 
-    fn whole_archives(&mut self) {
-        // hints not supported?
+        // This will cause the Microsoft linker to embed .natvis info into the the PDB file
+        let sysroot = self.sess.sysroot();
+        let natvis_dir_path = sysroot.join("lib\\rustlib\\etc");
+        if let Ok(natvis_dir) = fs::read_dir(&natvis_dir_path) {
+            // LLVM 5.0.0's lld-link frontend doesn't yet recognize, and chokes
+            // on, the /NATVIS:... flags.  LLVM 6 (or earlier) should at worst ignore
+            // them, eventually mooting this workaround, per this landed patch:
+            // https://github.com/llvm-mirror/lld/commit/27b9c4285364d8d76bb43839daa100
+            if let Some(ref linker_path) = self.sess.opts.cg.linker {
+                if let Some(linker_name) = Path::new(&linker_path).file_stem() {
+                    if linker_name.to_str().unwrap().to_lowercase() == "lld-link" {
+                        self.sess.warn("not embedding natvis: lld-link may not support the flag");
+                        return;
+                    }
+                }
+            }
+            for entry in natvis_dir {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.extension() == Some("natvis".as_ref()) {
+                            let mut arg = OsString::from("/NATVIS:");
+                            arg.push(path);
+                            self.cmd.arg(arg);
+                        }
+                    },
+                    Err(err) => {
+                        self.sess.warn(&format!("error enumerating natvis directory: {}", err));
+                    },
+                }
+            }
+        }
     }
-    fn no_whole_archives(&mut self) {
-        // hints not supported?
-    }
-
-    // On windows static libraries are of the form `foo.lib` and dynamic
-    // libraries are not linked against directly, but rather through their
-    // import libraries also called `foo.lib`. As a result there's no
-    // possibility for a native library to appear both dynamically and
-    // statically in the same folder so we don't have to worry about hints like
-    // we do on Unix platforms.
-    fn hint_static(&mut self) {}
-    fn hint_dynamic(&mut self) {}
 
     // Currently the compiler doesn't use `dllexport` (an LLVM attribute) to
     // export symbols from a dynamic library. When building a dynamic library,
@@ -323,49 +560,356 @@ impl<'a> Linker for MsvcLinker<'a> {
     // crates. Upstream rlibs may be linked statically to this dynamic library,
     // in which case they may continue to transitively be used and hence need
     // their symbols exported.
-    fn export_symbols(&mut self, sess: &Session, trans: &CrateTranslation,
-                      tmpdir: &Path) {
+    fn export_symbols(&mut self,
+                      tmpdir: &Path,
+                      crate_type: CrateType) {
         let path = tmpdir.join("lib.def");
         let res = (|| -> io::Result<()> {
-            let mut f = BufWriter::new(try!(File::create(&path)));
+            let mut f = BufWriter::new(File::create(&path)?);
 
             // Start off with the standard module name header and then go
             // straight to exports.
-            try!(writeln!(f, "LIBRARY"));
-            try!(writeln!(f, "EXPORTS"));
-
-            // Write out all our local symbols
-            for sym in trans.reachable.iter() {
-                try!(writeln!(f, "  {}", sym));
-            }
-
-            // Take a look at how all upstream crates are linked into this
-            // dynamic library. For all statically linked libraries we take all
-            // their reachable symbols and emit them as well.
-            let cstore = &sess.cstore;
-            let formats = sess.dependency_formats.borrow();
-            let symbols = formats[&CrateTypeDylib].iter();
-            let symbols = symbols.enumerate().filter_map(|(i, f)| {
-                if *f == Linkage::Static {
-                    Some((i + 1) as ast::CrateNum)
-                } else {
-                    None
-                }
-            }).flat_map(|cnum| {
-                cstore.reachable_ids(cnum)
-            }).map(|did| {
-                cstore.item_symbol(did)
-            });
-            for symbol in symbols {
-                try!(writeln!(f, "  {}", symbol));
+            writeln!(f, "LIBRARY")?;
+            writeln!(f, "EXPORTS")?;
+            for symbol in self.info.exports[&crate_type].iter() {
+                debug!("  _{}", symbol);
+                writeln!(f, "  {}", symbol)?;
             }
             Ok(())
         })();
         if let Err(e) = res {
-            sess.fatal(&format!("failed to write lib.def file: {}", e));
+            self.sess.fatal(&format!("failed to write lib.def file: {}", e));
         }
         let mut arg = OsString::from("/DEF:");
         arg.push(path);
         self.cmd.arg(&arg);
+    }
+
+    fn subsystem(&mut self, subsystem: &str) {
+        // Note that previous passes of the compiler validated this subsystem,
+        // so we just blindly pass it to the linker.
+        self.cmd.arg(&format!("/SUBSYSTEM:{}", subsystem));
+
+        // Windows has two subsystems we're interested in right now, the console
+        // and windows subsystems. These both implicitly have different entry
+        // points (starting symbols). The console entry point starts with
+        // `mainCRTStartup` and the windows entry point starts with
+        // `WinMainCRTStartup`. These entry points, defined in system libraries,
+        // will then later probe for either `main` or `WinMain`, respectively to
+        // start the application.
+        //
+        // In Rust we just always generate a `main` function so we want control
+        // to always start there, so we force the entry point on the windows
+        // subsystem to be `mainCRTStartup` to get everything booted up
+        // correctly.
+        //
+        // For more information see RFC #1665
+        if subsystem == "windows" {
+            self.cmd.arg("/ENTRY:mainCRTStartup");
+        }
+    }
+
+    fn finalize(&mut self) -> Command {
+        let mut cmd = Command::new("");
+        ::std::mem::swap(&mut cmd, &mut self.cmd);
+        cmd
+    }
+}
+
+pub struct EmLinker<'a> {
+    cmd: Command,
+    sess: &'a Session,
+    info: &'a LinkerInfo
+}
+
+impl<'a> Linker for EmLinker<'a> {
+    fn include_path(&mut self, path: &Path) {
+        self.cmd.arg("-L").arg(path);
+    }
+
+    fn link_staticlib(&mut self, lib: &str) {
+        self.cmd.arg("-l").arg(lib);
+    }
+
+    fn output_filename(&mut self, path: &Path) {
+        self.cmd.arg("-o").arg(path);
+    }
+
+    fn add_object(&mut self, path: &Path) {
+        self.cmd.arg(path);
+    }
+
+    fn link_dylib(&mut self, lib: &str) {
+        // Emscripten always links statically
+        self.link_staticlib(lib);
+    }
+
+    fn link_whole_staticlib(&mut self, lib: &str, _search_path: &[PathBuf]) {
+        // not supported?
+        self.link_staticlib(lib);
+    }
+
+    fn link_whole_rlib(&mut self, lib: &Path) {
+        // not supported?
+        self.link_rlib(lib);
+    }
+
+    fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+        self.link_dylib(lib);
+    }
+
+    fn link_rlib(&mut self, lib: &Path) {
+        self.add_object(lib);
+    }
+
+    fn position_independent_executable(&mut self) {
+        // noop
+    }
+
+    fn no_position_independent_executable(&mut self) {
+        // noop
+    }
+
+    fn full_relro(&mut self) {
+        // noop
+    }
+
+    fn partial_relro(&mut self) {
+        // noop
+    }
+
+    fn no_relro(&mut self) {
+        // noop
+    }
+
+    fn args(&mut self, args: &[String]) {
+        self.cmd.args(args);
+    }
+
+    fn framework_path(&mut self, _path: &Path) {
+        bug!("frameworks are not supported on Emscripten")
+    }
+
+    fn link_framework(&mut self, _framework: &str) {
+        bug!("frameworks are not supported on Emscripten")
+    }
+
+    fn gc_sections(&mut self, _keep_metadata: bool) {
+        // noop
+    }
+
+    fn optimize(&mut self) {
+        // Emscripten performs own optimizations
+        self.cmd.arg(match self.sess.opts.optimize {
+            OptLevel::No => "-O0",
+            OptLevel::Less => "-O1",
+            OptLevel::Default => "-O2",
+            OptLevel::Aggressive => "-O3",
+            OptLevel::Size => "-Os",
+            OptLevel::SizeMin => "-Oz"
+        });
+        // Unusable until https://github.com/rust-lang/rust/issues/38454 is resolved
+        self.cmd.args(&["--memory-init-file", "0"]);
+    }
+
+    fn debuginfo(&mut self) {
+        // Preserve names or generate source maps depending on debug info
+        self.cmd.arg(match self.sess.opts.debuginfo {
+            DebugInfoLevel::NoDebugInfo => "-g0",
+            DebugInfoLevel::LimitedDebugInfo => "-g3",
+            DebugInfoLevel::FullDebugInfo => "-g4"
+        });
+    }
+
+    fn no_default_libraries(&mut self) {
+        self.cmd.args(&["-s", "DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[]"]);
+    }
+
+    fn build_dylib(&mut self, _out_filename: &Path) {
+        bug!("building dynamic library is unsupported on Emscripten")
+    }
+
+    fn build_static_executable(&mut self) {
+        // noop
+    }
+
+    fn export_symbols(&mut self, _tmpdir: &Path, crate_type: CrateType) {
+        let symbols = &self.info.exports[&crate_type];
+
+        debug!("EXPORTED SYMBOLS:");
+
+        self.cmd.arg("-s");
+
+        let mut arg = OsString::from("EXPORTED_FUNCTIONS=");
+        let mut encoded = String::new();
+
+        {
+            let mut encoder = json::Encoder::new(&mut encoded);
+            let res = encoder.emit_seq(symbols.len(), |encoder| {
+                for (i, sym) in symbols.iter().enumerate() {
+                    encoder.emit_seq_elt(i, |encoder| {
+                        encoder.emit_str(&("_".to_string() + sym))
+                    })?;
+                }
+                Ok(())
+            });
+            if let Err(e) = res {
+                self.sess.fatal(&format!("failed to encode exported symbols: {}", e));
+            }
+        }
+        debug!("{}", encoded);
+        arg.push(encoded);
+
+        self.cmd.arg(arg);
+    }
+
+    fn subsystem(&mut self, _subsystem: &str) {
+        // noop
+    }
+
+    fn finalize(&mut self) -> Command {
+        let mut cmd = Command::new("");
+        ::std::mem::swap(&mut cmd, &mut self.cmd);
+        cmd
+    }
+}
+
+fn exported_symbols(tcx: TyCtxt, crate_type: CrateType) -> Vec<String> {
+    let mut symbols = Vec::new();
+
+    let export_threshold = symbol_export::crates_export_threshold(&[crate_type]);
+    for &(symbol, level) in tcx.exported_symbols(LOCAL_CRATE).iter() {
+        if level.is_below_threshold(export_threshold) {
+            symbols.push(symbol.symbol_name(tcx).to_string());
+        }
+    }
+
+    let formats = tcx.sess.dependency_formats.borrow();
+    let deps = formats[&crate_type].iter();
+
+    for (index, dep_format) in deps.enumerate() {
+        let cnum = CrateNum::new(index + 1);
+        // For each dependency that we are linking to statically ...
+        if *dep_format == Linkage::Static {
+            // ... we add its symbol list to our export list.
+            for &(symbol, level) in tcx.exported_symbols(cnum).iter() {
+                if level.is_below_threshold(export_threshold) {
+                    symbols.push(symbol.symbol_name(tcx).to_string());
+                }
+            }
+        }
+    }
+
+    symbols
+}
+
+pub struct WasmLd {
+    cmd: Command,
+}
+
+impl Linker for WasmLd {
+    fn link_dylib(&mut self, lib: &str) {
+        self.cmd.arg("-l").arg(lib);
+    }
+
+    fn link_staticlib(&mut self, lib: &str) {
+        self.cmd.arg("-l").arg(lib);
+    }
+
+    fn link_rlib(&mut self, lib: &Path) {
+        self.cmd.arg(lib);
+    }
+
+    fn include_path(&mut self, path: &Path) {
+        self.cmd.arg("-L").arg(path);
+    }
+
+    fn framework_path(&mut self, _path: &Path) {
+        panic!("frameworks not supported")
+    }
+
+    fn output_filename(&mut self, path: &Path) {
+        self.cmd.arg("-o").arg(path);
+    }
+
+    fn add_object(&mut self, path: &Path) {
+        self.cmd.arg(path);
+    }
+
+    fn position_independent_executable(&mut self) {
+    }
+
+    fn full_relro(&mut self) {
+    }
+
+    fn partial_relro(&mut self) {
+    }
+
+    fn no_relro(&mut self) {
+    }
+
+    fn build_static_executable(&mut self) {
+    }
+
+    fn args(&mut self, args: &[String]) {
+        self.cmd.args(args);
+    }
+
+    fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+        self.cmd.arg("-l").arg(lib);
+    }
+
+    fn link_framework(&mut self, _framework: &str) {
+        panic!("frameworks not supported")
+    }
+
+    fn link_whole_staticlib(&mut self, lib: &str, _search_path: &[PathBuf]) {
+        self.cmd.arg("-l").arg(lib);
+    }
+
+    fn link_whole_rlib(&mut self, lib: &Path) {
+        self.cmd.arg(lib);
+    }
+
+    fn gc_sections(&mut self, _keep_metadata: bool) {
+    }
+
+    fn optimize(&mut self) {
+    }
+
+    fn debuginfo(&mut self) {
+    }
+
+    fn no_default_libraries(&mut self) {
+    }
+
+    fn build_dylib(&mut self, _out_filename: &Path) {
+    }
+
+    fn export_symbols(&mut self, _tmpdir: &Path, _crate_type: CrateType) {
+    }
+
+    fn subsystem(&mut self, _subsystem: &str) {
+    }
+
+    fn no_position_independent_executable(&mut self) {
+    }
+
+    fn finalize(&mut self) -> Command {
+        self.cmd.arg("--threads");
+
+        // FIXME we probably shouldn't pass this but instead pass an explicit
+        // whitelist of symbols we'll allow to be undefined. Unfortunately
+        // though we can't handle symbols like `log10` that LLVM injects at a
+        // super late date without actually parsing object files. For now let's
+        // stick to this and hopefully fix it before stabilization happens.
+        self.cmd.arg("--allow-undefined");
+
+        // For now we just never have an entry symbol
+        self.cmd.arg("--no-entry");
+
+        let mut cmd = Command::new("");
+        ::std::mem::swap(&mut cmd, &mut self.cmd);
+        cmd
     }
 }

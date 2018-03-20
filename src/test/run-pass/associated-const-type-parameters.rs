@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(associated_consts)]
 
 trait Foo {
     const X: i32;
@@ -27,8 +26,18 @@ impl Foo for Def {
     const X: i32 = 97;
 }
 
+struct Proxy<T>(T);
+
+impl<T: Foo> Foo for Proxy<T> {
+    const X: i32 = T::X;
+}
+
 fn sub<A: Foo, B: Foo>() -> i32 {
     A::X - B::X
+}
+
+trait Bar: Foo {
+    const Y: i32 = Self::X;
 }
 
 fn main() {
@@ -38,4 +47,7 @@ fn main() {
     assert_eq!(97, Def::get_x());
     assert_eq!(-86, sub::<Abc, Def>());
     assert_eq!(86, sub::<Def, Abc>());
+    assert_eq!(-86, sub::<Proxy<Abc>, Def>());
+    assert_eq!(-86, sub::<Abc, Proxy<Def>>());
+    assert_eq!(86, sub::<Proxy<Def>, Proxy<Abc>>());
 }

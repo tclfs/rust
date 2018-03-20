@@ -5,10 +5,18 @@ HOST_RPATH_ENV = \
 TARGET_RPATH_ENV = \
     $(LD_LIB_PATH_ENVVAR)="$(TMPDIR):$(TARGET_RPATH_DIR):$($(LD_LIB_PATH_ENVVAR))"
 
-BARE_RUSTC := $(HOST_RPATH_ENV) $(RUSTC)
+RUSTC_ORIGINAL := $(RUSTC)
+BARE_RUSTC := $(HOST_RPATH_ENV) '$(RUSTC)'
+BARE_RUSTDOC := $(HOST_RPATH_ENV) '$(RUSTDOC)'
 RUSTC := $(BARE_RUSTC) --out-dir $(TMPDIR) -L $(TMPDIR) $(RUSTFLAGS)
+RUSTDOC := $(BARE_RUSTDOC)
+ifdef RUSTC_LINKER
+RUSTC := $(RUSTC) -Clinker=$(RUSTC_LINKER)
+RUSTDOC := $(RUSTDOC) --linker $(RUSTC_LINKER) -Z unstable-options
+endif
 #CC := $(CC) -L $(TMPDIR)
 HTMLDOCCK := $(PYTHON) $(S)/src/etc/htmldocck.py
+CGREP := "$(S)/src/etc/cat-and-grep.sh"
 
 # This is the name of the binary we will generate and run; use this
 # e.g. for `$(CC) -o $(RUN_BINFILE)`.
@@ -22,9 +30,6 @@ RLIB_GLOB = lib$(1)*.rlib
 BIN = $(1)
 
 UNAME = $(shell uname)
-ifneq (,$(findstring MINGW,$(UNAME)))
-IS_WINDOWS=1
-endif
 
 ifeq ($(UNAME),Darwin)
 RUN = $(TARGET_RPATH_ENV) $(RUN_BINFILE)
@@ -75,6 +80,7 @@ else
 endif
 else
 ifeq ($(UNAME),Darwin)
+	EXTRACFLAGS := -lresolv
 else
 ifeq ($(UNAME),FreeBSD)
 	EXTRACFLAGS := -lm -lpthread -lgcc_s
@@ -84,10 +90,10 @@ ifeq ($(UNAME),Bitrig)
 	EXTRACXXFLAGS := -lc++ -lc++abi
 else
 ifeq ($(UNAME),SunOS)
-	EXTRACFLAGS := -lm -lpthread -lposix4 -lsocket
+	EXTRACFLAGS := -lm -lpthread -lposix4 -lsocket -lresolv
 else
 ifeq ($(UNAME),OpenBSD)
-	EXTRACFLAGS := -lm -lpthread
+	EXTRACFLAGS := -lm -lpthread -lc++abi
 	RUSTC := $(RUSTC) -C linker="$(word 1,$(CC:ccache=))"
 else
 	EXTRACFLAGS := -lm -lrt -ldl -lpthread
@@ -103,13 +109,13 @@ REMOVE_DYLIBS     = rm $(TMPDIR)/$(call DYLIB_GLOB,$(1))
 REMOVE_RLIBS      = rm $(TMPDIR)/$(call RLIB_GLOB,$(1))
 
 %.a: %.o
-	ar crus $@ $<
+	$(AR) crus $@ $<
 ifdef IS_MSVC
 %.lib: lib%.o
 	$(MSVC_LIB) -out:`cygpath -w $@` $<
 else
 %.lib: lib%.o
-	ar crus $@ $<
+	$(AR) crus $@ $<
 endif
 %.dylib: %.o
 	$(CC) -dynamiclib -Wl,-dylib -o $@ $<

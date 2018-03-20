@@ -12,7 +12,7 @@
 
 pub trait MyTrait { fn dummy(&self) { } }
 
-// @has foo/struct.Alpha.html '//pre' "pub struct Alpha<A> where A: MyTrait"
+// @has foo/struct.Alpha.html '//pre' "pub struct Alpha<A>(_) where A: MyTrait"
 pub struct Alpha<A>(A) where A: MyTrait;
 // @has foo/trait.Bravo.html '//pre' "pub trait Bravo<B> where B: MyTrait"
 pub trait Bravo<B> where B: MyTrait { fn get(&self, B: B); }
@@ -44,5 +44,5 @@ pub enum Foxtrot<F> { Foxtrot1(F) }
 impl<F> MyTrait for Foxtrot<F> where F: MyTrait {}
 
 // @has foo/type.Golf.html '//pre[@class="rust typedef"]' \
-//          "type Golf<T> where T: Clone = (T, T)"
+//          "type Golf<T> where T: Clone, = (T, T)"
 pub type Golf<T> where T: Clone = (T, T);

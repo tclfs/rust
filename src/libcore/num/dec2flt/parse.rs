@@ -20,7 +20,6 @@
 //! modules rely on to not panic (or overflow) in turn.
 //! To make matters worse, all that happens in a single pass over the input.
 //! So, be careful when modifying anything, and double-check with the other modules.
-use prelude::v1::*;
 use super::num;
 use self::ParseResult::{Valid, ShortcutToInf, ShortcutToZero, Invalid};
 
@@ -74,7 +73,8 @@ pub fn parse_decimal(s: &str) -> ParseResult {
         }
         Some(&b'.') => {
             let (fractional, s) = eat_digits(&s[1..]);
-            if integral.is_empty() && fractional.is_empty() && s.is_empty() {
+            if integral.is_empty() && fractional.is_empty() {
+                // We require at least a single digit before or after the point.
                 return Invalid;
             }
 

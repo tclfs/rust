@@ -15,7 +15,7 @@ pub enum Category {
     // An assignable memory location like `x`, `x.f`, `foo()[3]`, that
     // sort of thing. Something that could appear on the LHS of an `=`
     // sign.
-    Lvalue,
+    Place,
 
     // A literal like `23` or `"foo"`. Does not include constant
     // expressions like `3 + 5`.
@@ -51,15 +51,16 @@ impl Category {
             ExprKind::SelfRef |
             ExprKind::VarRef { .. } |
             ExprKind::StaticRef { .. } =>
-                Some(Category::Lvalue),
+                Some(Category::Place),
 
             ExprKind::LogicalOp { .. } |
             ExprKind::If { .. } |
             ExprKind::Match { .. } |
+            ExprKind::NeverToAny { .. } |
             ExprKind::Call { .. } =>
                 Some(Category::Rvalue(RvalueFunc::Into)),
 
-            ExprKind::Vec { .. } |
+            ExprKind::Array { .. } |
             ExprKind::Tuple { .. } |
             ExprKind::Adt { .. } |
             ExprKind::Closure { .. } |
@@ -67,13 +68,16 @@ impl Category {
             ExprKind::Binary { .. } |
             ExprKind::Box { .. } |
             ExprKind::Cast { .. } |
+            ExprKind::Use { .. } |
             ExprKind::ReifyFnPointer { .. } |
+            ExprKind::ClosureFnPointer { .. } |
             ExprKind::UnsafeFnPointer { .. } |
             ExprKind::Unsize { .. } |
             ExprKind::Repeat { .. } |
             ExprKind::Borrow { .. } |
             ExprKind::Assign { .. } |
             ExprKind::AssignOp { .. } |
+            ExprKind::Yield { .. } |
             ExprKind::InlineAsm { .. } =>
                 Some(Category::Rvalue(RvalueFunc::AsRvalue)),
 

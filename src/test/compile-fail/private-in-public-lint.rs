@@ -9,24 +9,20 @@
 // except according to those terms.
 
 mod m1 {
-    #![deny(private_in_public)]
-
     pub struct Pub;
     struct Priv;
 
     impl Pub {
-        pub fn f() -> Priv {} //~ ERROR private type in public interface
+        pub fn f() -> Priv {Priv} //~ ERROR private type `m1::Priv` in public interface
     }
 }
 
 mod m2 {
-    #![deny(future_incompatible)]
-
     pub struct Pub;
     struct Priv;
 
     impl Pub {
-        pub fn f() -> Priv {} //~ ERROR private type in public interface
+        pub fn f() -> Priv {Priv} //~ ERROR private type `m2::Priv` in public interface
     }
 }
 

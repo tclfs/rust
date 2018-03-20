@@ -11,22 +11,24 @@
 pub use self::BinOpToken::*;
 pub use self::Nonterminal::*;
 pub use self::DelimToken::*;
-pub use self::IdentStyle::*;
 pub use self::Lit::*;
 pub use self::Token::*;
 
-use ast::{self, BinOpKind};
-use ext::mtwt;
+use ast::{self};
+use parse::ParseSess;
+use print::pprust;
 use ptr::P;
-use util::interner::{RcStr, StrInterner};
-use util::interner;
-
 use serialize::{Decodable, Decoder, Encodable, Encoder};
-use std::fmt;
-use std::ops::Deref;
-use std::rc::Rc;
+use symbol::keywords;
+use syntax::parse::parse_stream_from_source_str;
+use syntax_pos::{self, Span, FileName};
+use tokenstream::{TokenStream, TokenTree};
+use tokenstream;
 
-#[allow(non_camel_case_types)]
+use std::cell::Cell;
+use std::{cmp, fmt};
+use rustc_data_structures::sync::Lrc;
+
 #[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
 pub enum BinOpToken {
     Plus,
@@ -50,27 +52,17 @@ pub enum DelimToken {
     Bracket,
     /// A curly brace: `{` or `}`
     Brace,
+    /// An empty delimiter
+    NoDelim,
 }
 
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
-pub enum IdentStyle {
-    /// `::` follows the identifier with no whitespace in-between.
-    ModName,
-    Plain,
-}
+impl DelimToken {
+    pub fn len(self) -> usize {
+        if self == NoDelim { 0 } else { 1 }
+    }
 
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
-pub enum SpecialMacroVar {
-    /// `$crate` will be filled in with the name of the crate a macro was
-    /// imported from, if any.
-    CrateMacroVar,
-}
-
-impl SpecialMacroVar {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SpecialMacroVar::CrateMacroVar => "crate",
-        }
+    pub fn is_empty(self) -> bool {
+        self == NoDelim
     }
 }
 
@@ -99,7 +91,47 @@ impl Lit {
     }
 }
 
-#[allow(non_camel_case_types)]
+fn ident_can_begin_expr(ident: ast::Ident) -> bool {
+    let ident_token: Token = Ident(ident);
+
+    !ident_token.is_reserved_ident() ||
+    ident_token.is_path_segment_keyword() ||
+    [
+        keywords::Do.name(),
+        keywords::Box.name(),
+        keywords::Break.name(),
+        keywords::Continue.name(),
+        keywords::False.name(),
+        keywords::For.name(),
+        keywords::If.name(),
+        keywords::Loop.name(),
+        keywords::Match.name(),
+        keywords::Move.name(),
+        keywords::Return.name(),
+        keywords::True.name(),
+        keywords::Unsafe.name(),
+        keywords::While.name(),
+        keywords::Yield.name(),
+        keywords::Static.name(),
+    ].contains(&ident.name)
+}
+
+fn ident_can_begin_type(ident: ast::Ident) -> bool {
+    let ident_token: Token = Ident(ident);
+
+    !ident_token.is_reserved_ident() ||
+    ident_token.is_path_segment_keyword() ||
+    [
+        keywords::Underscore.name(),
+        keywords::For.name(),
+        keywords::Impl.name(),
+        keywords::Fn.name(),
+        keywords::Unsafe.name(),
+        keywords::Extern.name(),
+        keywords::Typeof.name(),
+    ].contains(&ident.name)
+}
+
 #[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug)]
 pub enum Token {
     /* Expression-operator symbols. */
@@ -122,6 +154,8 @@ pub enum Token {
     Dot,
     DotDot,
     DotDotDot,
+    DotDotEq,
+    DotEq, // HACK(durka42) never produced by the parser, only used for libproc_macro
     Comma,
     Semi,
     Colon,
@@ -141,23 +175,15 @@ pub enum Token {
     Literal(Lit, Option<ast::Name>),
 
     /* Name components */
-    Ident(ast::Ident, IdentStyle),
-    Underscore,
+    Ident(ast::Ident),
     Lifetime(ast::Ident),
 
-    /* For interpolation */
-    Interpolated(Nonterminal),
+    // The `LazyTokenStream` is a pure function of the `Nonterminal`,
+    // and so the `LazyTokenStream` can be ignored by Eq, Hash, etc.
+    Interpolated(Lrc<(Nonterminal, LazyTokenStream)>),
     // Can be expanded into several tokens.
     /// Doc comment
     DocComment(ast::Name),
-    // In left-hand-sides of MBE macros:
-    /// Parse a nonterminal (name to bind, name of NT, styles of their idents)
-    MatchNt(ast::Ident, ast::Ident, IdentStyle, IdentStyle),
-    // In right-hand-sides of MBE macros:
-    /// A syntactic variable that will be filled in by macro expansion.
-    SubstNt(ast::Ident, IdentStyle),
-    /// A macro variable with special meaning.
-    SpecialVarNt(SpecialMacroVar),
 
     // Junk. These carry no data because we don't really care about the data
     // they *would* carry, and don't really want to allocate a new ident for
@@ -173,6 +199,10 @@ pub enum Token {
 }
 
 impl Token {
+    pub fn interpolated(nt: Nonterminal) -> Token {
+        Token::Interpolated(Lrc::new((nt, LazyTokenStream::new())))
+    }
+
     /// Returns `true` if the token starts with '>'.
     pub fn is_like_gt(&self) -> bool {
         match *self {
@@ -184,42 +214,85 @@ impl Token {
     /// Returns `true` if the token can appear at the start of an expression.
     pub fn can_begin_expr(&self) -> bool {
         match *self {
-            OpenDelim(_)                => true,
-            Ident(_, _)                 => true,
-            Underscore                  => true,
-            Tilde                       => true,
-            Literal(_, _)               => true,
-            Not                         => true,
-            BinOp(Minus)                => true,
-            BinOp(Star)                 => true,
-            BinOp(And)                  => true,
-            BinOp(Or)                   => true, // in lambda syntax
-            OrOr                        => true, // in lambda syntax
-            AndAnd                      => true, // double borrow
-            DotDot | DotDotDot          => true, // range notation
-            ModSep                      => true,
-            Interpolated(NtExpr(..))    => true,
-            Interpolated(NtIdent(..))   => true,
-            Interpolated(NtBlock(..))   => true,
-            Interpolated(NtPath(..))    => true,
-            Pound                       => true, // for expression attributes
-            _                           => false,
+            Ident(ident)                => ident_can_begin_expr(ident), // value name or keyword
+            OpenDelim(..)                     | // tuple, array or block
+            Literal(..)                       | // literal
+            Not                               | // operator not
+            BinOp(Minus)                      | // unary minus
+            BinOp(Star)                       | // dereference
+            BinOp(Or) | OrOr                  | // closure
+            BinOp(And)                        | // reference
+            AndAnd                            | // double reference
+            // DotDotDot is no longer supported, but we need some way to display the error
+            DotDot | DotDotDot | DotDotEq     | // range notation
+            Lt | BinOp(Shl)                   | // associated path
+            ModSep                            | // global path
+            Pound                             => true, // expression attributes
+            Interpolated(ref nt) => match nt.0 {
+                NtIdent(..) | NtExpr(..) | NtBlock(..) | NtPath(..) => true,
+                _ => false,
+            },
+            _ => false,
         }
+    }
+
+    /// Returns `true` if the token can appear at the start of a type.
+    pub fn can_begin_type(&self) -> bool {
+        match *self {
+            Ident(ident)                => ident_can_begin_type(ident), // type name or keyword
+            OpenDelim(Paren)            | // tuple
+            OpenDelim(Bracket)          | // array
+            Not                         | // never
+            BinOp(Star)                 | // raw pointer
+            BinOp(And)                  | // reference
+            AndAnd                      | // double reference
+            Question                    | // maybe bound in trait object
+            Lifetime(..)                | // lifetime bound in trait object
+            Lt | BinOp(Shl)             | // associated path
+            ModSep                      => true, // global path
+            Interpolated(ref nt) => match nt.0 {
+                NtIdent(..) | NtTy(..) | NtPath(..) | NtLifetime(..) => true,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if the token can appear at the start of a generic bound.
+    pub fn can_begin_bound(&self) -> bool {
+        self.is_path_start() || self.is_lifetime() || self.is_keyword(keywords::For) ||
+        self == &Question || self == &OpenDelim(Paren)
     }
 
     /// Returns `true` if the token is any literal
     pub fn is_lit(&self) -> bool {
         match *self {
-            Literal(_, _) => true,
-            _          => false,
+            Literal(..) => true,
+            _           => false,
+        }
+    }
+
+    pub fn ident(&self) -> Option<ast::Ident> {
+        match *self {
+            Ident(ident) => Some(ident),
+            Interpolated(ref nt) => match nt.0 {
+                NtIdent(ident) => Some(ident.node),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
     /// Returns `true` if the token is an identifier.
     pub fn is_ident(&self) -> bool {
+        self.ident().is_some()
+    }
+
+    /// Returns `true` if the token is a documentation comment.
+    pub fn is_doc_comment(&self) -> bool {
         match *self {
-            Ident(_, _) => true,
-            _           => false,
+            DocComment(..)   => true,
+            _                => false,
         }
     }
 
@@ -233,28 +306,32 @@ impl Token {
 
     /// Returns `true` if the token is an interpolated path.
     pub fn is_path(&self) -> bool {
-        match *self {
-            Interpolated(NtPath(..))    => true,
-            _                           => false,
+        if let Interpolated(ref nt) = *self {
+            if let NtPath(..) = nt.0 {
+                return true;
+            }
         }
+        false
     }
 
-    /// Returns `true` if the token is a path that is not followed by a `::`
-    /// token.
-    #[allow(non_upper_case_globals)]
-    pub fn is_plain_ident(&self) -> bool {
+    /// Returns a lifetime with the span and a dummy id if it is a lifetime,
+    /// or the original lifetime if it is an interpolated lifetime, ignoring
+    /// the span.
+    pub fn lifetime(&self, span: Span) -> Option<ast::Lifetime> {
         match *self {
-            Ident(_, Plain) => true,
-            _               => false,
+            Lifetime(ident) =>
+                Some(ast::Lifetime { ident: ident, span: span, id: ast::DUMMY_NODE_ID }),
+            Interpolated(ref nt) => match nt.0 {
+                NtLifetime(lifetime) => Some(lifetime),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
     /// Returns `true` if the token is a lifetime.
     pub fn is_lifetime(&self) -> bool {
-        match *self {
-            Lifetime(..) => true,
-            _            => false,
-        }
+        self.lifetime(syntax_pos::DUMMY_SP).is_some()
     }
 
     /// Returns `true` if the token is either the `mut` or `const` keyword.
@@ -263,116 +340,183 @@ impl Token {
         self.is_keyword(keywords::Const)
     }
 
-    /// Maps a token to its corresponding binary operator.
-    pub fn to_binop(&self) -> Option<BinOpKind> {
-        match *self {
-            BinOp(Star)     => Some(BinOpKind::Mul),
-            BinOp(Slash)    => Some(BinOpKind::Div),
-            BinOp(Percent)  => Some(BinOpKind::Rem),
-            BinOp(Plus)     => Some(BinOpKind::Add),
-            BinOp(Minus)    => Some(BinOpKind::Sub),
-            BinOp(Shl)      => Some(BinOpKind::Shl),
-            BinOp(Shr)      => Some(BinOpKind::Shr),
-            BinOp(And)      => Some(BinOpKind::BitAnd),
-            BinOp(Caret)    => Some(BinOpKind::BitXor),
-            BinOp(Or)       => Some(BinOpKind::BitOr),
-            Lt              => Some(BinOpKind::Lt),
-            Le              => Some(BinOpKind::Le),
-            Ge              => Some(BinOpKind::Ge),
-            Gt              => Some(BinOpKind::Gt),
-            EqEq            => Some(BinOpKind::Eq),
-            Ne              => Some(BinOpKind::Ne),
-            AndAnd          => Some(BinOpKind::And),
-            OrOr            => Some(BinOpKind::Or),
-            _               => None,
-        }
+    pub fn is_qpath_start(&self) -> bool {
+        self == &Lt || self == &BinOp(Shl)
+    }
+
+    pub fn is_path_start(&self) -> bool {
+        self == &ModSep || self.is_qpath_start() || self.is_path() ||
+        self.is_path_segment_keyword() || self.is_ident() && !self.is_reserved_ident()
     }
 
     /// Returns `true` if the token is a given keyword, `kw`.
-    #[allow(non_upper_case_globals)]
     pub fn is_keyword(&self, kw: keywords::Keyword) -> bool {
-        match *self {
-            Ident(sid, Plain) => kw.to_name() == sid.name,
-            _                      => false,
+        self.ident().map(|ident| ident.name == kw.name()).unwrap_or(false)
+    }
+
+    pub fn is_path_segment_keyword(&self) -> bool {
+        match self.ident() {
+            Some(id) => id.name == keywords::Super.name() ||
+                        id.name == keywords::SelfValue.name() ||
+                        id.name == keywords::SelfType.name() ||
+                        id.name == keywords::Extern.name() ||
+                        id.name == keywords::Crate.name() ||
+                        id.name == keywords::CrateRoot.name() ||
+                        id.name == keywords::DollarCrate.name(),
+            None => false,
         }
     }
 
-    pub fn is_keyword_allow_following_colon(&self, kw: keywords::Keyword) -> bool {
-        match *self {
-            Ident(sid, _) => { kw.to_name() == sid.name }
-            _ => { false }
+    // Returns true for reserved identifiers used internally for elided lifetimes,
+    // unnamed method parameters, crate root module, error recovery etc.
+    pub fn is_special_ident(&self) -> bool {
+        match self.ident() {
+            Some(id) => id.name <= keywords::Underscore.name(),
+            _ => false,
         }
     }
 
-    /// Returns `true` if the token is either a special identifier, or a strict
-    /// or reserved keyword.
-    #[allow(non_upper_case_globals)]
-    pub fn is_any_keyword(&self) -> bool {
-        match *self {
-            Ident(sid, Plain) => {
-                let n = sid.name;
+    /// Returns `true` if the token is a keyword used in the language.
+    pub fn is_used_keyword(&self) -> bool {
+        match self.ident() {
+            Some(id) => id.name >= keywords::As.name() && id.name <= keywords::While.name(),
+            _ => false,
+        }
+    }
 
-                   n == SELF_KEYWORD_NAME
-                || n == STATIC_KEYWORD_NAME
-                || n == SUPER_KEYWORD_NAME
-                || n == SELF_TYPE_KEYWORD_NAME
-                || STRICT_KEYWORD_START <= n
-                && n <= RESERVED_KEYWORD_FINAL
+    /// Returns `true` if the token is a keyword reserved for possible future use.
+    pub fn is_unused_keyword(&self) -> bool {
+        match self.ident() {
+            Some(id) => id.name >= keywords::Abstract.name() && id.name <= keywords::Yield.name(),
+            _ => false,
+        }
+    }
+
+    pub fn glue(self, joint: Token) -> Option<Token> {
+        Some(match self {
+            Eq => match joint {
+                Eq => EqEq,
+                Gt => FatArrow,
+                _ => return None,
             },
-            _ => false
+            Lt => match joint {
+                Eq => Le,
+                Lt => BinOp(Shl),
+                Le => BinOpEq(Shl),
+                BinOp(Minus) => LArrow,
+                _ => return None,
+            },
+            Gt => match joint {
+                Eq => Ge,
+                Gt => BinOp(Shr),
+                Ge => BinOpEq(Shr),
+                _ => return None,
+            },
+            Not => match joint {
+                Eq => Ne,
+                _ => return None,
+            },
+            BinOp(op) => match joint {
+                Eq => BinOpEq(op),
+                BinOp(And) if op == And => AndAnd,
+                BinOp(Or) if op == Or => OrOr,
+                Gt if op == Minus => RArrow,
+                _ => return None,
+            },
+            Dot => match joint {
+                Dot => DotDot,
+                DotDot => DotDotDot,
+                DotEq => DotDotEq,
+                _ => return None,
+            },
+            DotDot => match joint {
+                Dot => DotDotDot,
+                Eq => DotDotEq,
+                _ => return None,
+            },
+            Colon => match joint {
+                Colon => ModSep,
+                _ => return None,
+            },
+
+            Le | EqEq | Ne | Ge | AndAnd | OrOr | Tilde | BinOpEq(..) | At | DotDotDot | DotEq |
+            DotDotEq | Comma | Semi | ModSep | RArrow | LArrow | FatArrow | Pound | Dollar |
+            Question | OpenDelim(..) | CloseDelim(..) => return None,
+
+            Literal(..) | Ident(..) | Lifetime(..) | Interpolated(..) | DocComment(..) |
+            Whitespace | Comment | Shebang(..) | Eof => return None,
+        })
+    }
+
+    /// Returns tokens that are likely to be typed accidentally instead of the current token.
+    /// Enables better error recovery when the wrong token is found.
+    pub fn similar_tokens(&self) -> Option<Vec<Token>> {
+        match *self {
+            Comma => Some(vec![Dot, Lt]),
+            Semi => Some(vec![Colon]),
+            _ => None
         }
     }
 
-    /// Returns `true` if the token may not appear as an identifier.
-    #[allow(non_upper_case_globals)]
-    pub fn is_strict_keyword(&self) -> bool {
-        match *self {
-            Ident(sid, Plain) => {
-                let n = sid.name;
+    /// Returns `true` if the token is either a special identifier or a keyword.
+    pub fn is_reserved_ident(&self) -> bool {
+        self.is_special_ident() || self.is_used_keyword() || self.is_unused_keyword()
+    }
 
-                   n == SELF_KEYWORD_NAME
-                || n == STATIC_KEYWORD_NAME
-                || n == SUPER_KEYWORD_NAME
-                || n == SELF_TYPE_KEYWORD_NAME
-                || STRICT_KEYWORD_START <= n
-                && n <= STRICT_KEYWORD_FINAL
-            },
-            Ident(sid, ModName) => {
-                let n = sid.name;
+    pub fn interpolated_to_tokenstream(&self, sess: &ParseSess, span: Span)
+        -> TokenStream
+    {
+        let nt = match *self {
+            Token::Interpolated(ref nt) => nt,
+            _ => panic!("only works on interpolated tokens"),
+        };
 
-                   n != SELF_KEYWORD_NAME
-                && n != SUPER_KEYWORD_NAME
-                && STRICT_KEYWORD_START <= n
-                && n <= STRICT_KEYWORD_FINAL
+        // An `Interpolated` token means that we have a `Nonterminal`
+        // which is often a parsed AST item. At this point we now need
+        // to convert the parsed AST to an actual token stream, e.g.
+        // un-parse it basically.
+        //
+        // Unfortunately there's not really a great way to do that in a
+        // guaranteed lossless fashion right now. The fallback here is
+        // to just stringify the AST node and reparse it, but this loses
+        // all span information.
+        //
+        // As a result, some AST nodes are annotated with the token
+        // stream they came from. Attempt to extract these lossless
+        // token streams before we fall back to the stringification.
+        let mut tokens = None;
+
+        match nt.0 {
+            Nonterminal::NtItem(ref item) => {
+                tokens = prepend_attrs(sess, &item.attrs, item.tokens.as_ref(), span);
             }
-            _ => false,
+            Nonterminal::NtTraitItem(ref item) => {
+                tokens = prepend_attrs(sess, &item.attrs, item.tokens.as_ref(), span);
+            }
+            Nonterminal::NtImplItem(ref item) => {
+                tokens = prepend_attrs(sess, &item.attrs, item.tokens.as_ref(), span);
+            }
+            Nonterminal::NtIdent(ident) => {
+                let token = Token::Ident(ident.node);
+                tokens = Some(TokenTree::Token(ident.span, token).into());
+            }
+            Nonterminal::NtLifetime(lifetime) => {
+                let token = Token::Lifetime(lifetime.ident);
+                tokens = Some(TokenTree::Token(lifetime.span, token).into());
+            }
+            Nonterminal::NtTT(ref tt) => {
+                tokens = Some(tt.clone().into());
+            }
+            _ => {}
         }
-    }
 
-    /// Returns `true` if the token is a keyword that has been reserved for
-    /// possible future use.
-    #[allow(non_upper_case_globals)]
-    pub fn is_reserved_keyword(&self) -> bool {
-        match *self {
-            Ident(sid, Plain) => {
-                let n = sid.name;
-
-                   RESERVED_KEYWORD_START <= n
-                && n <= RESERVED_KEYWORD_FINAL
-            },
-            _ => false,
-        }
-    }
-
-    /// Hygienic identifier equality comparison.
-    ///
-    /// See `styntax::ext::mtwt`.
-    pub fn mtwt_eq(&self, other : &Token) -> bool {
-        match (self, other) {
-            (&Ident(id1,_), &Ident(id2,_)) | (&Lifetime(id1), &Lifetime(id2)) =>
-                mtwt::resolve(id1) == mtwt::resolve(id2),
-            _ => *self == *other
-        }
+        tokens.unwrap_or_else(|| {
+            nt.1.force(|| {
+                // FIXME(jseyfried): Avoid this pretty-print + reparse hack
+                let source = pprust::token_to_string(self);
+                parse_stream_from_source_str(FileName::MacroExpansion, source, sess, Some(span))
+            })
+        })
     }
 }
 
@@ -381,22 +525,24 @@ impl Token {
 pub enum Nonterminal {
     NtItem(P<ast::Item>),
     NtBlock(P<ast::Block>),
-    NtStmt(P<ast::Stmt>),
+    NtStmt(ast::Stmt),
     NtPat(P<ast::Pat>),
     NtExpr(P<ast::Expr>),
     NtTy(P<ast::Ty>),
-    NtIdent(Box<ast::SpannedIdent>, IdentStyle),
+    NtIdent(ast::SpannedIdent),
     /// Stuff inside brackets for attributes
-    NtMeta(P<ast::MetaItem>),
-    NtPath(Box<ast::Path>),
-    NtTT(P<ast::TokenTree>), // needs P'ed to break a circularity
+    NtMeta(ast::MetaItem),
+    NtPath(ast::Path),
+    NtVis(ast::Visibility),
+    NtTT(TokenTree),
     // These are not exposed to macros, but are used by quasiquote.
     NtArm(ast::Arm),
-    NtImplItem(P<ast::ImplItem>),
-    NtTraitItem(P<ast::TraitItem>),
+    NtImplItem(ast::ImplItem),
+    NtTraitItem(ast::TraitItem),
     NtGenerics(ast::Generics),
     NtWhereClause(ast::WhereClause),
     NtArg(ast::Arg),
+    NtLifetime(ast::Lifetime),
 }
 
 impl fmt::Debug for Nonterminal {
@@ -418,367 +564,95 @@ impl fmt::Debug for Nonterminal {
             NtGenerics(..) => f.pad("NtGenerics(..)"),
             NtWhereClause(..) => f.pad("NtWhereClause(..)"),
             NtArg(..) => f.pad("NtArg(..)"),
+            NtVis(..) => f.pad("NtVis(..)"),
+            NtLifetime(..) => f.pad("NtLifetime(..)"),
         }
     }
 }
 
-
-// Get the first "argument"
-macro_rules! first {
-    ( $first:expr, $( $remainder:expr, )* ) => ( $first )
-}
-
-// Get the last "argument" (has to be done recursively to avoid phoney local ambiguity error)
-macro_rules! last {
-    ( $first:expr, $( $remainder:expr, )+ ) => ( last!( $( $remainder, )+ ) );
-    ( $first:expr, ) => ( $first )
-}
-
-// In this macro, there is the requirement that the name (the number) must be monotonically
-// increasing by one in the special identifiers, starting at 0; the same holds for the keywords,
-// except starting from the next number instead of zero, and with the additional exception that
-// special identifiers are *also* allowed (they are deduplicated in the important place, the
-// interner), an exception which is demonstrated by "static" and "self".
-macro_rules! declare_special_idents_and_keywords {(
-    // So now, in these rules, why is each definition parenthesised?
-    // Answer: otherwise we get a spurious local ambiguity bug on the "}"
-    pub mod special_idents {
-        $( ($si_name:expr, $si_static:ident, $si_str:expr); )*
-    }
-
-    pub mod keywords {
-        'strict:
-        $( ($sk_name:expr, $sk_variant:ident, $sk_str:expr); )*
-        'reserved:
-        $( ($rk_name:expr, $rk_variant:ident, $rk_str:expr); )*
-    }
-) => {
-    const STRICT_KEYWORD_START: ast::Name = first!($( ast::Name($sk_name), )*);
-    const STRICT_KEYWORD_FINAL: ast::Name = last!($( ast::Name($sk_name), )*);
-    const RESERVED_KEYWORD_START: ast::Name = first!($( ast::Name($rk_name), )*);
-    const RESERVED_KEYWORD_FINAL: ast::Name = last!($( ast::Name($rk_name), )*);
-
-    pub mod special_idents {
-        use ast;
-        $(
-            #[allow(non_upper_case_globals)]
-            pub const $si_static: ast::Ident = ast::Ident {
-                name: ast::Name($si_name),
-                ctxt: ast::EMPTY_CTXT,
-            };
-         )*
-    }
-
-    pub mod special_names {
-        use ast;
-        $(
-            #[allow(non_upper_case_globals)]
-            pub const $si_static: ast::Name = ast::Name($si_name);
-        )*
-    }
-
-    /// All the valid words that have meaning in the Rust language.
-    ///
-    /// Rust keywords are either 'strict' or 'reserved'.  Strict keywords may not
-    /// appear as identifiers at all. Reserved keywords are not used anywhere in
-    /// the language and may not appear as identifiers.
-    pub mod keywords {
-        pub use self::Keyword::*;
-        use ast;
-
-        #[derive(Copy, Clone, PartialEq, Eq)]
-        pub enum Keyword {
-            $( $sk_variant, )*
-            $( $rk_variant, )*
-        }
-
-        impl Keyword {
-            pub fn to_name(&self) -> ast::Name {
-                match *self {
-                    $( $sk_variant => ast::Name($sk_name), )*
-                    $( $rk_variant => ast::Name($rk_name), )*
-                }
-            }
-        }
-    }
-
-    fn mk_fresh_ident_interner() -> IdentInterner {
-        let mut init_vec = Vec::new();
-        $(init_vec.push($si_str);)*
-        $(init_vec.push($sk_str);)*
-        $(init_vec.push($rk_str);)*
-        interner::StrInterner::prefill(&init_vec[..])
-    }
-}}
-
-// If the special idents get renumbered, remember to modify these two as appropriate
-pub const SELF_KEYWORD_NAME: ast::Name = ast::Name(SELF_KEYWORD_NAME_NUM);
-const STATIC_KEYWORD_NAME: ast::Name = ast::Name(STATIC_KEYWORD_NAME_NUM);
-const SUPER_KEYWORD_NAME: ast::Name = ast::Name(SUPER_KEYWORD_NAME_NUM);
-const SELF_TYPE_KEYWORD_NAME: ast::Name = ast::Name(SELF_TYPE_KEYWORD_NAME_NUM);
-
-pub const SELF_KEYWORD_NAME_NUM: u32 = 1;
-const STATIC_KEYWORD_NAME_NUM: u32 = 2;
-const SUPER_KEYWORD_NAME_NUM: u32 = 3;
-const SELF_TYPE_KEYWORD_NAME_NUM: u32 = 10;
-
-// NB: leaving holes in the ident table is bad! a different ident will get
-// interned with the id from the hole, but it will be between the min and max
-// of the reserved words, and thus tagged as "reserved".
-
-declare_special_idents_and_keywords! {
-    pub mod special_idents {
-        // These ones are statics
-        (0,                          invalid,                "");
-        (super::SELF_KEYWORD_NAME_NUM,   self_,              "self");
-        (super::STATIC_KEYWORD_NAME_NUM, statik,             "static");
-        (super::SUPER_KEYWORD_NAME_NUM, super_,              "super");
-        (4,                          static_lifetime,        "'static");
-
-        // for matcher NTs
-        (5,                          tt,                     "tt");
-        (6,                          matchers,               "matchers");
-
-        // outside of libsyntax
-        (7,                          clownshoe_abi,          "__rust_abi");
-        (8,                          opaque,                 "<opaque>");
-        (9,                          __unused1,              "<__unused1>");
-        (super::SELF_TYPE_KEYWORD_NAME_NUM, type_self,       "Self");
-        (11,                         prelude_import,         "prelude_import");
-        (12,                         DEFAULT,                "default");
-    }
-
-    pub mod keywords {
-        // These ones are variants of the Keyword enum
-
-        'strict:
-        (13,                         As,         "as");
-        (14,                         Break,      "break");
-        (15,                         Crate,      "crate");
-        (16,                         Else,       "else");
-        (17,                         Enum,       "enum");
-        (18,                         Extern,     "extern");
-        (19,                         False,      "false");
-        (20,                         Fn,         "fn");
-        (21,                         For,        "for");
-        (22,                         If,         "if");
-        (23,                         Impl,       "impl");
-        (24,                         In,         "in");
-        (25,                         Let,        "let");
-        (26,                         Loop,       "loop");
-        (27,                         Match,      "match");
-        (28,                         Mod,        "mod");
-        (29,                         Move,       "move");
-        (30,                         Mut,        "mut");
-        (31,                         Pub,        "pub");
-        (32,                         Ref,        "ref");
-        (33,                         Return,     "return");
-        // Static and Self are also special idents (prefill de-dupes)
-        (super::STATIC_KEYWORD_NAME_NUM, Static, "static");
-        (super::SELF_KEYWORD_NAME_NUM, SelfValue, "self");
-        (super::SELF_TYPE_KEYWORD_NAME_NUM, SelfType, "Self");
-        (34,                         Struct,     "struct");
-        (super::SUPER_KEYWORD_NAME_NUM, Super,   "super");
-        (35,                         True,       "true");
-        (36,                         Trait,      "trait");
-        (37,                         Type,       "type");
-        (38,                         Unsafe,     "unsafe");
-        (39,                         Use,        "use");
-        (40,                         While,      "while");
-        (41,                         Continue,   "continue");
-        (42,                         Box,        "box");
-        (43,                         Const,      "const");
-        (44,                         Where,      "where");
-        'reserved:
-        (45,                         Virtual,    "virtual");
-        (46,                         Proc,       "proc");
-        (47,                         Alignof,    "alignof");
-        (48,                         Become,     "become");
-        (49,                         Offsetof,   "offsetof");
-        (50,                         Priv,       "priv");
-        (51,                         Pure,       "pure");
-        (52,                         Sizeof,     "sizeof");
-        (53,                         Typeof,     "typeof");
-        (54,                         Unsized,    "unsized");
-        (55,                         Yield,      "yield");
-        (56,                         Do,         "do");
-        (57,                         Abstract,   "abstract");
-        (58,                         Final,      "final");
-        (59,                         Override,   "override");
-        (60,                         Macro,      "macro");
+pub fn is_op(tok: &Token) -> bool {
+    match *tok {
+        OpenDelim(..) | CloseDelim(..) | Literal(..) | DocComment(..) |
+        Ident(..) | Lifetime(..) | Interpolated(..) |
+        Whitespace | Comment | Shebang(..) | Eof => false,
+        _ => true,
     }
 }
 
-// looks like we can get rid of this completely...
-pub type IdentInterner = StrInterner;
+pub struct LazyTokenStream(Cell<Option<TokenStream>>);
 
-// if an interner exists in TLS, return it. Otherwise, prepare a
-// fresh one.
-// FIXME(eddyb) #8726 This should probably use a thread-local reference.
-pub fn get_ident_interner() -> Rc<IdentInterner> {
-    thread_local!(static KEY: Rc<::parse::token::IdentInterner> = {
-        Rc::new(mk_fresh_ident_interner())
-    });
-    KEY.with(|k| k.clone())
-}
-
-/// Reset the ident interner to its initial state.
-pub fn reset_ident_interner() {
-    let interner = get_ident_interner();
-    interner.reset(mk_fresh_ident_interner());
-}
-
-/// Represents a string stored in the thread-local interner. Because the
-/// interner lives for the life of the thread, this can be safely treated as an
-/// immortal string, as long as it never crosses between threads.
-///
-/// FIXME(pcwalton): You must be careful about what you do in the destructors
-/// of objects stored in TLS, because they may run after the interner is
-/// destroyed. In particular, they must not access string contents. This can
-/// be fixed in the future by just leaking all strings until thread death
-/// somehow.
-#[derive(Clone, PartialEq, Hash, PartialOrd, Eq, Ord)]
-pub struct InternedString {
-    string: RcStr,
-}
-
-impl InternedString {
-    #[inline]
-    pub fn new(string: &'static str) -> InternedString {
-        InternedString {
-            string: RcStr::new(string),
-        }
-    }
-
-    #[inline]
-    fn new_from_rc_str(string: RcStr) -> InternedString {
-        InternedString {
-            string: string,
-        }
-    }
-
-    #[inline]
-    pub fn new_from_name(name: ast::Name) -> InternedString {
-        let interner = get_ident_interner();
-        InternedString::new_from_rc_str(interner.get(name))
+impl Clone for LazyTokenStream {
+    fn clone(&self) -> Self {
+        let opt_stream = self.0.take();
+        self.0.set(opt_stream.clone());
+        LazyTokenStream(Cell::new(opt_stream))
     }
 }
 
-impl Deref for InternedString {
-    type Target = str;
-
-    fn deref(&self) -> &str { &self.string }
+impl cmp::Eq for LazyTokenStream {}
+impl PartialEq for LazyTokenStream {
+    fn eq(&self, _other: &LazyTokenStream) -> bool {
+        true
+    }
 }
 
-impl fmt::Debug for InternedString {
+impl fmt::Debug for LazyTokenStream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.string, f)
+        fmt::Debug::fmt(&self.clone().0.into_inner(), f)
     }
 }
 
-impl fmt::Display for InternedString {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.string, f)
+impl LazyTokenStream {
+    pub fn new() -> Self {
+        LazyTokenStream(Cell::new(None))
+    }
+
+    pub fn force<F: FnOnce() -> TokenStream>(&self, f: F) -> TokenStream {
+        let mut opt_stream = self.0.take();
+        if opt_stream.is_none() {
+            opt_stream = Some(f());
+        }
+        self.0.set(opt_stream.clone());
+        opt_stream.clone().unwrap()
     }
 }
 
-impl<'a> PartialEq<&'a str> for InternedString {
-    #[inline(always)]
-    fn eq(&self, other: & &'a str) -> bool {
-        PartialEq::eq(&self.string[..], *other)
-    }
-    #[inline(always)]
-    fn ne(&self, other: & &'a str) -> bool {
-        PartialEq::ne(&self.string[..], *other)
+impl Encodable for LazyTokenStream {
+    fn encode<S: Encoder>(&self, _: &mut S) -> Result<(), S::Error> {
+        Ok(())
     }
 }
 
-impl<'a> PartialEq<InternedString> for &'a str {
-    #[inline(always)]
-    fn eq(&self, other: &InternedString) -> bool {
-        PartialEq::eq(*self, &other.string[..])
-    }
-    #[inline(always)]
-    fn ne(&self, other: &InternedString) -> bool {
-        PartialEq::ne(*self, &other.string[..])
+impl Decodable for LazyTokenStream {
+    fn decode<D: Decoder>(_: &mut D) -> Result<LazyTokenStream, D::Error> {
+        Ok(LazyTokenStream::new())
     }
 }
 
-impl Decodable for InternedString {
-    fn decode<D: Decoder>(d: &mut D) -> Result<InternedString, D::Error> {
-        Ok(intern(try!(d.read_str()).as_ref()).as_str())
+impl ::std::hash::Hash for LazyTokenStream {
+    fn hash<H: ::std::hash::Hasher>(&self, _hasher: &mut H) {}
+}
+
+fn prepend_attrs(sess: &ParseSess,
+                 attrs: &[ast::Attribute],
+                 tokens: Option<&tokenstream::TokenStream>,
+                 span: syntax_pos::Span)
+    -> Option<tokenstream::TokenStream>
+{
+    let tokens = tokens?;
+    if attrs.len() == 0 {
+        return Some(tokens.clone())
     }
-}
-
-impl Encodable for InternedString {
-    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        s.emit_str(&self.string)
+    let mut builder = tokenstream::TokenStreamBuilder::new();
+    for attr in attrs {
+        assert_eq!(attr.style, ast::AttrStyle::Outer,
+                   "inner attributes should prevent cached tokens from existing");
+        // FIXME: Avoid this pretty-print + reparse hack as bove
+        let name = FileName::MacroExpansion;
+        let source = pprust::attr_to_string(attr);
+        let stream = parse_stream_from_source_str(name, source, sess, Some(span));
+        builder.push(stream);
     }
-}
-
-/// Interns and returns the string contents of an identifier, using the
-/// thread-local interner.
-#[inline]
-pub fn intern_and_get_ident(s: &str) -> InternedString {
-    intern(s).as_str()
-}
-
-/// Maps a string to its interned representation.
-#[inline]
-pub fn intern(s: &str) -> ast::Name {
-    get_ident_interner().intern(s)
-}
-
-/// gensym's a new usize, using the current interner.
-#[inline]
-pub fn gensym(s: &str) -> ast::Name {
-    get_ident_interner().gensym(s)
-}
-
-/// Maps a string to an identifier with an empty syntax context.
-#[inline]
-pub fn str_to_ident(s: &str) -> ast::Ident {
-    ast::Ident::with_empty_ctxt(intern(s))
-}
-
-/// Maps a string to a gensym'ed identifier.
-#[inline]
-pub fn gensym_ident(s: &str) -> ast::Ident {
-    ast::Ident::with_empty_ctxt(gensym(s))
-}
-
-// create a fresh name that maps to the same string as the old one.
-// note that this guarantees that str_ptr_eq(ident_to_string(src),interner_get(fresh_name(src)));
-// that is, that the new name and the old one are connected to ptr_eq strings.
-pub fn fresh_name(src: ast::Ident) -> ast::Name {
-    let interner = get_ident_interner();
-    interner.gensym_copy(src.name)
-    // following: debug version. Could work in final except that it's incompatible with
-    // good error messages and uses of struct names in ambiguous could-be-binding
-    // locations. Also definitely destroys the guarantee given above about ptr_eq.
-    /*let num = rand::thread_rng().gen_uint_range(0,0xffff);
-    gensym(format!("{}_{}",ident_to_string(src),num))*/
-}
-
-// create a fresh mark.
-pub fn fresh_mark() -> ast::Mrk {
-    gensym("mark").0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ast;
-    use ext::mtwt;
-
-    fn mark_ident(id : ast::Ident, m : ast::Mrk) -> ast::Ident {
-        ast::Ident::new(id.name, mtwt::apply_mark(m, id.ctxt))
-    }
-
-    #[test] fn mtwt_token_eq_test() {
-        assert!(Gt.mtwt_eq(&Gt));
-        let a = str_to_ident("bac");
-        let a1 = mark_ident(a,92);
-        assert!(Ident(a, ModName).mtwt_eq(&Ident(a1, Plain)));
-    }
+    builder.push(tokens.clone());
+    Some(builder.build())
 }

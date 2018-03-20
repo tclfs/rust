@@ -14,7 +14,16 @@
 //! compiler code, rather than using their own custom pass. Those
 //! lints are all available in `rustc_lint::builtin`.
 
+use errors::DiagnosticBuilder;
 use lint::{LintPass, LateLintPass, LintArray};
+use session::Session;
+use syntax::codemap::Span;
+
+declare_lint! {
+    pub EXCEEDING_BITSHIFTS,
+    Deny,
+    "shift exceeds the type's number of bits"
+}
 
 declare_lint! {
     pub CONST_ERR,
@@ -71,6 +80,18 @@ declare_lint! {
 }
 
 declare_lint! {
+    pub UNREACHABLE_PATTERNS,
+    Warn,
+    "detects unreachable patterns"
+}
+
+declare_lint! {
+    pub UNUSED_MACROS,
+    Warn,
+    "detects macros that were not used"
+}
+
+declare_lint! {
     pub WARNINGS,
     Warn,
     "mass-change the level for lints which produce warnings"
@@ -95,18 +116,6 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub VARIANT_SIZE_DIFFERENCES,
-    Allow,
-    "detects enums with widely varying variant sizes"
-}
-
-declare_lint! {
-    pub FAT_PTR_TRANSMUTES,
-    Allow,
-    "detects transmutes of fat pointers"
-}
-
-declare_lint! {
     pub TRIVIAL_CASTS,
     Allow,
     "detects trivial casts which could be removed"
@@ -125,33 +134,130 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub INACCESSIBLE_EXTERN_CRATE,
-    Warn,
-    "use of inaccessible extern crate erroneously allowed"
+    pub PUB_USE_OF_PRIVATE_EXTERN_CRATE,
+    Deny,
+    "detect public re-exports of private extern crates"
 }
 
 declare_lint! {
     pub INVALID_TYPE_PARAM_DEFAULT,
-    Warn,
+    Deny,
     "type parameter default erroneously allowed in invalid location"
 }
 
 declare_lint! {
-    pub MATCH_OF_UNIT_VARIANT_VIA_PAREN_DOTDOT,
+    pub RENAMED_AND_REMOVED_LINTS,
+    Warn,
+    "lints that have been renamed or removed"
+}
+
+declare_lint! {
+    pub SAFE_EXTERN_STATICS,
     Deny,
-    "unit struct or enum variant erroneously allowed to match via path::ident(..)"
+    "safe access to extern statics was erroneously allowed"
 }
 
 declare_lint! {
-    pub RAW_POINTER_DERIVE,
+    pub SAFE_PACKED_BORROWS,
     Warn,
-    "uses of #[derive] with raw pointers are rarely correct"
+    "safe borrows of fields of packed structs were was erroneously allowed"
 }
 
 declare_lint! {
-    pub TRANSMUTE_FROM_FN_ITEM_TYPES,
+    pub PATTERNS_IN_FNS_WITHOUT_BODY,
     Warn,
-    "transmute from function item type to pointer-sized type erroneously allowed"
+    "patterns in functions without body were erroneously allowed"
+}
+
+declare_lint! {
+    pub LEGACY_DIRECTORY_OWNERSHIP,
+    Deny,
+    "non-inline, non-`#[path]` modules (e.g. `mod foo;`) were erroneously allowed in some files \
+     not named `mod.rs`"
+}
+
+declare_lint! {
+    pub LEGACY_IMPORTS,
+    Deny,
+    "detects names that resolve to ambiguous glob imports with RFC 1560"
+}
+
+declare_lint! {
+    pub LEGACY_CONSTRUCTOR_VISIBILITY,
+    Deny,
+    "detects use of struct constructors that would be invisible with new visibility rules"
+}
+
+declare_lint! {
+    pub MISSING_FRAGMENT_SPECIFIER,
+    Deny,
+    "detects missing fragment specifiers in unused `macro_rules!` patterns"
+}
+
+declare_lint! {
+    pub PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES,
+    Deny,
+    "detects parenthesized generic parameters in type and module names"
+}
+
+declare_lint! {
+    pub LATE_BOUND_LIFETIME_ARGUMENTS,
+    Warn,
+    "detects generic lifetime arguments in path segments with late bound lifetime parameters"
+}
+
+declare_lint! {
+    pub INCOHERENT_FUNDAMENTAL_IMPLS,
+    Warn,
+    "potentially-conflicting impls were erroneously allowed"
+}
+
+declare_lint! {
+    pub DEPRECATED,
+    Warn,
+    "detects use of deprecated items"
+}
+
+declare_lint! {
+    pub UNUSED_UNSAFE,
+    Warn,
+    "unnecessary use of an `unsafe` block"
+}
+
+declare_lint! {
+    pub UNUSED_MUT,
+    Warn,
+    "detect mut variables which don't need to be mutable"
+}
+
+declare_lint! {
+    pub SINGLE_USE_LIFETIME,
+    Allow,
+   "detects single use lifetimes"
+}
+
+declare_lint! {
+    pub TYVAR_BEHIND_RAW_POINTER,
+    Warn,
+    "raw pointer to an inference variable"
+}
+
+declare_lint! {
+    pub ELIDED_LIFETIME_IN_PATH,
+    Allow,
+    "hidden lifetime parameters are deprecated, try `Foo<'_>`"
+}
+
+declare_lint! {
+    pub BARE_TRAIT_OBJECT,
+    Allow,
+    "suggest using `dyn Trait` for trait objects"
+}
+
+declare_lint! {
+    pub ILLEGAL_FLOATING_POINT_LITERAL_PATTERN,
+    Warn,
+    "floating-point literals cannot be used in patterns"
 }
 
 /// Does nothing as a lint pass, but registers some `Lint`s
@@ -162,6 +268,8 @@ pub struct HardwiredLints;
 impl LintPass for HardwiredLints {
     fn get_lints(&self) -> LintArray {
         lint_array!(
+            ILLEGAL_FLOATING_POINT_LITERAL_PATTERN,
+            EXCEEDING_BITSHIFTS,
             UNUSED_IMPORTS,
             UNUSED_EXTERN_CRATES,
             UNUSED_QUALIFICATIONS,
@@ -170,23 +278,62 @@ impl LintPass for HardwiredLints {
             UNUSED_ASSIGNMENTS,
             DEAD_CODE,
             UNREACHABLE_CODE,
+            UNREACHABLE_PATTERNS,
+            UNUSED_MACROS,
             WARNINGS,
             UNUSED_FEATURES,
             STABLE_FEATURES,
             UNKNOWN_CRATE_TYPES,
-            VARIANT_SIZE_DIFFERENCES,
-            FAT_PTR_TRANSMUTES,
             TRIVIAL_CASTS,
             TRIVIAL_NUMERIC_CASTS,
             PRIVATE_IN_PUBLIC,
-            INACCESSIBLE_EXTERN_CRATE,
+            PUB_USE_OF_PRIVATE_EXTERN_CRATE,
             INVALID_TYPE_PARAM_DEFAULT,
-            MATCH_OF_UNIT_VARIANT_VIA_PAREN_DOTDOT,
             CONST_ERR,
-            RAW_POINTER_DERIVE,
-            TRANSMUTE_FROM_FN_ITEM_TYPES
+            RENAMED_AND_REMOVED_LINTS,
+            SAFE_EXTERN_STATICS,
+            SAFE_PACKED_BORROWS,
+            PATTERNS_IN_FNS_WITHOUT_BODY,
+            LEGACY_DIRECTORY_OWNERSHIP,
+            LEGACY_IMPORTS,
+            LEGACY_CONSTRUCTOR_VISIBILITY,
+            MISSING_FRAGMENT_SPECIFIER,
+            PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES,
+            LATE_BOUND_LIFETIME_ARGUMENTS,
+            INCOHERENT_FUNDAMENTAL_IMPLS,
+            DEPRECATED,
+            UNUSED_UNSAFE,
+            UNUSED_MUT,
+            SINGLE_USE_LIFETIME,
+            TYVAR_BEHIND_RAW_POINTER,
+            ELIDED_LIFETIME_IN_PATH,
+            BARE_TRAIT_OBJECT
         )
     }
 }
 
-impl LateLintPass for HardwiredLints {}
+// this could be a closure, but then implementing derive traits
+// becomes hacky (and it gets allocated)
+#[derive(PartialEq, RustcEncodable, RustcDecodable, Debug)]
+pub enum BuiltinLintDiagnostics {
+    Normal,
+    BareTraitObject(Span, /* is_global */ bool)
+}
+
+impl BuiltinLintDiagnostics {
+    pub fn run(self, sess: &Session, db: &mut DiagnosticBuilder) {
+        match self {
+            BuiltinLintDiagnostics::Normal => (),
+            BuiltinLintDiagnostics::BareTraitObject(span, is_global) => {
+                let sugg = match sess.codemap().span_to_snippet(span) {
+                    Ok(ref s) if is_global => format!("dyn ({})", s),
+                    Ok(s) => format!("dyn {}", s),
+                    Err(_) => format!("dyn <type>")
+                };
+                db.span_suggestion(span, "use `dyn`", sugg);
+            }
+        }
+    }
+}
+
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for HardwiredLints {}

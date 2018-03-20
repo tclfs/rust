@@ -8,17 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
-
 // error-pattern:diverging_fn called
 // error-pattern:0 dropped
-
-use std::io::{self, Write};
 
 struct Droppable(u8);
 impl Drop for Droppable {
     fn drop(&mut self) {
-        write!(io::stderr(), "{} dropped", self.0);
+        eprintln!("{} dropped", self.0);
     }
 }
 
@@ -26,7 +22,6 @@ fn diverging_fn() -> ! {
     panic!("diverging_fn called")
 }
 
-#[rustc_mir]
 fn mir(d: Droppable) {
     diverging_fn();
 }

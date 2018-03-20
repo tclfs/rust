@@ -10,13 +10,12 @@
 
 // aux-build:fat_drop.rs
 
-#![feature(drop_in_place)]
-
 extern crate fat_drop;
 
 fn main() {
     unsafe {
-        let s: &mut fat_drop::S = std::mem::uninitialized();
+        let data: &mut [u8] = &mut [0];
+        let s: &mut fat_drop::S = std::mem::transmute::<&mut [u8], _>(data);
         std::ptr::drop_in_place(s);
         assert!(fat_drop::DROPPED);
     }

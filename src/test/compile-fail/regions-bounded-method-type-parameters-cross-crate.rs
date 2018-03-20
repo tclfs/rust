@@ -8,11 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// aux-build:regions_bounded_method_type_parameters_cross_crate_lib.rs
+// aux-build:rbmtp_cross_crate_lib.rs
 
 // Check explicit region bounds on methods in the cross crate case.
 
-extern crate regions_bounded_method_type_parameters_cross_crate_lib as lib;
+extern crate rbmtp_cross_crate_lib as lib;
 
 use lib::Inv;
 use lib::MaybeOwned;
@@ -27,7 +27,7 @@ fn call_into_maybe_owned<'x,F:IntoMaybeOwned<'x>>(f: F) {
 
 fn call_bigger_region<'x, 'y>(a: Inv<'x>, b: Inv<'y>) {
     // Here the value provided for 'y is 'y, and hence 'y:'x does not hold.
-    a.bigger_region(b) //~ ERROR cannot infer
+    a.bigger_region(b) //~ ERROR 30:7: 30:20: lifetime mismatch [E0623]
 }
 
 fn main() { }

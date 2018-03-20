@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern:expected macro name without module separators
+// gate-test-use_extern_macros
 
 fn main() {
-    globnar::brotz!();
+    globnar::brotz!(); //~ ERROR non-ident macro paths are experimental
+    #[derive(foo::Bar)] struct T; //~ ERROR non-ident macro paths are experimental
+    ::foo!(); //~ ERROR non-ident macro paths are experimental
 }

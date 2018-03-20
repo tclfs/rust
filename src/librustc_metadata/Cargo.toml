@@ -9,14 +9,14 @@ path = "lib.rs"
 crate-type = ["dylib"]
 
 [dependencies]
-flate = { path = "../libflate" }
-log = { path = "../liblog" }
-rbml = { path = "../librbml" }
+flate2 = "1.0"
+log = "0.4"
+proc_macro = { path = "../libproc_macro" }
 rustc = { path = "../librustc" }
 rustc_back = { path = "../librustc_back" }
-rustc_bitflags = { path = "../librustc_bitflags" }
-rustc_const_eval = { path = "../librustc_const_eval" }
-rustc_front = { path = "../librustc_front" }
-rustc_llvm = { path = "../librustc_llvm" }
+rustc_data_structures = { path = "../librustc_data_structures" }
+rustc_errors = { path = "../librustc_errors" }
 serialize = { path = "../libserialize" }
 syntax = { path = "../libsyntax" }
+syntax_ext = { path = "../libsyntax_ext" }
+syntax_pos = { path = "../libsyntax_pos" }

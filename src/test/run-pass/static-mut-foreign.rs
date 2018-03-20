@@ -12,12 +12,13 @@
 // statics cannot. This ensures that there's some form of error if this is
 // attempted.
 
+// ignore-wasm32-bare no libc to test ffi with
 
 #![feature(libc)]
 
 extern crate libc;
 
-#[link(name = "rust_test_helpers")]
+#[link(name = "rust_test_helpers", kind = "static")]
 extern {
     static mut rust_dbg_static_mut: libc::c_int;
     pub fn rust_dbg_static_mut_check_four();

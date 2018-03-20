@@ -12,15 +12,12 @@
 
 #![allow(bad_style)]
 
-use prelude::v1::*;
 use os::windows::prelude::*;
 
 use error::Error as StdError;
 use ffi::{OsString, OsStr};
 use fmt;
 use io;
-use libc::{c_int, c_void};
-use ops::Range;
 use os::windows::ffi::EncodeWide;
 use path::{self, PathBuf};
 use ptr;
@@ -35,7 +32,7 @@ pub fn errno() -> i32 {
 }
 
 /// Gets a detailed string description for the given error number.
-pub fn error_string(errnum: i32) -> String {
+pub fn error_string(mut errnum: i32) -> String {
     // This value is calculated from the macro
     // MAKELANGID(LANG_SYSTEM_DEFAULT, SUBLANG_SYS_DEFAULT)
     let langId = 0x0800 as c::DWORD;
@@ -43,9 +40,27 @@ pub fn error_string(errnum: i32) -> String {
     let mut buf = [0 as c::WCHAR; 2048];
 
     unsafe {
-        let res = c::FormatMessageW(c::FORMAT_MESSAGE_FROM_SYSTEM |
+        let mut module = ptr::null_mut();
+        let mut flags = 0;
+
+        // NTSTATUS errors may be encoded as HRESULT, which may returned from
+        // GetLastError. For more information about Windows error codes, see
+        // `[MS-ERREF]`: https://msdn.microsoft.com/en-us/library/cc231198.aspx
+        if (errnum & c::FACILITY_NT_BIT as i32) != 0 {
+            // format according to https://support.microsoft.com/en-us/help/259693
+            const NTDLL_DLL: &'static [u16] = &['N' as _, 'T' as _, 'D' as _, 'L' as _, 'L' as _,
+                                                '.' as _, 'D' as _, 'L' as _, 'L' as _, 0];
+            module = c::GetModuleHandleW(NTDLL_DLL.as_ptr());
+
+            if module != ptr::null_mut() {
+                errnum ^= c::FACILITY_NT_BIT as i32;
+                flags = c::FORMAT_MESSAGE_FROM_HMODULE;
+            }
+        }
+
+        let res = c::FormatMessageW(flags | c::FORMAT_MESSAGE_FROM_SYSTEM |
                                         c::FORMAT_MESSAGE_IGNORE_INSERTS,
-                                    ptr::null_mut(),
+                                    module,
                                     errnum as c::DWORD,
                                     langId,
                                     buf.as_mut_ptr(),
@@ -239,7 +254,7 @@ pub fn chdir(p: &path::Path) -> io::Result<()> {
 }
 
 pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
-    let k = try!(to_u16s(k));
+    let k = to_u16s(k)?;
     let res = super::fill_utf16_buf(|buf, sz| unsafe {
         c::GetEnvironmentVariableW(k.as_ptr(), buf, sz)
     }, |buf| {
@@ -258,8 +273,8 @@ pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
 }
 
 pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
-    let k = try!(to_u16s(k));
-    let v = try!(to_u16s(v));
+    let k = to_u16s(k)?;
+    let v = to_u16s(v)?;
 
     cvt(unsafe {
         c::SetEnvironmentVariableW(k.as_ptr(), v.as_ptr())
@@ -267,57 +282,10 @@ pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
 }
 
 pub fn unsetenv(n: &OsStr) -> io::Result<()> {
-    let v = try!(to_u16s(n));
+    let v = to_u16s(n)?;
     cvt(unsafe {
         c::SetEnvironmentVariableW(v.as_ptr(), ptr::null())
     }).map(|_| ())
-}
-
-pub struct Args {
-    range: Range<isize>,
-    cur: *mut *mut u16,
-}
-
-impl Iterator for Args {
-    type Item = OsString;
-    fn next(&mut self) -> Option<OsString> {
-        self.range.next().map(|i| unsafe {
-            let ptr = *self.cur.offset(i);
-            let mut len = 0;
-            while *ptr.offset(len) != 0 { len += 1; }
-
-            // Push it onto the list.
-            let ptr = ptr as *const u16;
-            let buf = slice::from_raw_parts(ptr, len as usize);
-            OsStringExt::from_wide(buf)
-        })
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) { self.range.size_hint() }
-}
-
-impl ExactSizeIterator for Args {
-    fn len(&self) -> usize { self.range.len() }
-}
-
-impl Drop for Args {
-    fn drop(&mut self) {
-        // self.cur can be null if CommandLineToArgvW previously failed,
-        // but LocalFree ignores NULL pointers
-        unsafe { c::LocalFree(self.cur as *mut c_void); }
-    }
-}
-
-pub fn args() -> Args {
-    unsafe {
-        let mut nArgs: c_int = 0;
-        let lpCmdLine = c::GetCommandLineW();
-        let szArgList = c::CommandLineToArgvW(lpCmdLine, &mut nArgs);
-
-        // szArcList can be NULL if CommandLinToArgvW failed,
-        // but in that case nArgs is 0 so we won't actually
-        // try to read a null pointer
-        Args { cur: szArgList, range: 0..(nArgs as isize) }
-    }
 }
 
 pub fn temp_dir() -> PathBuf {
@@ -348,4 +316,22 @@ pub fn home_dir() -> Option<PathBuf> {
 
 pub fn exit(code: i32) -> ! {
     unsafe { c::ExitProcess(code as c::UINT) }
+}
+
+pub fn getpid() -> u32 {
+    unsafe { c::GetCurrentProcessId() as u32 }
+}
+
+#[cfg(test)]
+mod tests {
+    use io::Error;
+    use sys::c;
+
+    // tests `error_string` above
+    #[test]
+    fn ntstatus_error() {
+        const STATUS_UNSUCCESSFUL: u32 = 0xc000_0001;
+        assert!(!Error::from_raw_os_error((STATUS_UNSUCCESSFUL | c::FACILITY_NT_BIT) as _)
+            .to_string().contains("FormatMessageW() returned error"));
+    }
 }

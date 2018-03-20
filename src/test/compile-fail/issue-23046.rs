@@ -10,7 +10,7 @@
 
 pub enum Expr<'var, VAR> {
     Let(Box<Expr<'var, VAR>>,
-        Box<for<'v: 'var> Fn(Expr<'v, VAR>) -> Expr<'v, VAR> + 'var>)
+        Box<for<'v> Fn(Expr<'v, VAR>) -> Expr<'v, VAR> + 'var>)
 }
 
 pub fn add<'var, VAR>
@@ -18,13 +18,13 @@ pub fn add<'var, VAR>
     loop {}
 }
 
-pub fn let_<'var, VAR, F: for<'v: 'var> Fn(Expr<'v, VAR>) -> Expr<'v, VAR>>
+pub fn let_<'var, VAR, F: for<'v> Fn(Expr<'v, VAR>) -> Expr<'v, VAR>>
                        (a: Expr<'var, VAR>, b: F) -> Expr<'var, VAR> {
     loop {}
 }
 
 fn main() {
-    let ex = |x| {
-        let_(add(x,x), |y| { //~ ERROR unable to infer enough type information about `_`
+    let ex = |x| { //~ ERROR type annotations needed
+        let_(add(x,x), |y| {
             let_(add(x, x), |x|x)})};
 }

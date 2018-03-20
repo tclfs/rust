@@ -8,40 +8,26 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use super::DepNode;
-use super::thread::{DepGraphThreadData, DepMessage};
+use super::graph::CurrentDepGraph;
 
-pub struct DepTask<'graph> {
-    data: &'graph DepGraphThreadData,
-    key: DepNode,
-}
-
-impl<'graph> DepTask<'graph> {
-    pub fn new(data: &'graph DepGraphThreadData, key: DepNode) -> DepTask<'graph> {
-        data.enqueue(DepMessage::PushTask(key));
-        DepTask { data: data, key: key }
-    }
-}
-
-impl<'graph> Drop for DepTask<'graph> {
-    fn drop(&mut self) {
-        self.data.enqueue(DepMessage::PopTask(self.key));
-    }
-}
+use std::cell::RefCell;
 
 pub struct IgnoreTask<'graph> {
-    data: &'graph DepGraphThreadData
+    graph: &'graph RefCell<CurrentDepGraph>,
 }
 
 impl<'graph> IgnoreTask<'graph> {
-    pub fn new(data: &'graph DepGraphThreadData) -> IgnoreTask<'graph> {
-        data.enqueue(DepMessage::PushIgnore);
-        IgnoreTask { data: data }
+    pub(super) fn new(graph: &'graph RefCell<CurrentDepGraph>) -> IgnoreTask<'graph> {
+        graph.borrow_mut().push_ignore();
+        IgnoreTask {
+            graph,
+        }
     }
 }
 
 impl<'graph> Drop for IgnoreTask<'graph> {
     fn drop(&mut self) {
-        self.data.enqueue(DepMessage::PopIgnore);
+        self.graph.borrow_mut().pop_ignore();
     }
 }
+

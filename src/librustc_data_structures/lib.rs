@@ -16,36 +16,65 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "rustc_data_structures"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://www.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
+#![feature(collections_range)]
 #![feature(nonzero)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
+#![feature(unboxed_closures)]
+#![feature(fn_traits)]
+#![feature(unsize)]
+#![feature(i128_type)]
+#![feature(i128)]
+#![feature(conservative_impl_trait)]
+#![feature(specialization)]
+#![feature(optin_builtin_traits)]
+#![feature(underscore_lifetimes)]
+#![feature(macro_vis_matcher)]
+#![feature(allow_internal_unstable)]
+#![feature(universal_impl_trait)]
 
+#![cfg_attr(unix, feature(libc))]
 #![cfg_attr(test, feature(test))]
 
 extern crate core;
+extern crate ena;
 #[macro_use]
 extern crate log;
 extern crate serialize as rustc_serialize; // used by deriving
+#[cfg(unix)]
+extern crate libc;
+extern crate parking_lot;
+#[macro_use]
+extern crate cfg_if;
+extern crate stable_deref_trait;
 
+pub use rustc_serialize::hex::ToHex;
+
+pub mod array_vec;
+pub mod accumulate_vec;
+pub mod small_vec;
+pub mod base_n;
+pub mod bitslice;
 pub mod bitvec;
 pub mod graph;
-pub mod ivar;
+pub mod indexed_set;
+pub mod indexed_vec;
 pub mod obligation_forest;
-pub mod snapshot_vec;
+pub mod sip128;
+pub mod snapshot_map;
+pub use ena::snapshot_vec;
+pub mod stable_hasher;
 pub mod transitive_relation;
-pub mod unify;
-pub mod fnv;
+pub use ena::unify;
+pub mod fx;
 pub mod tuple_slice;
-pub mod veccell;
+pub mod control_flow_graph;
+pub mod flock;
+pub mod sync;
+pub mod owning_ref;
 
 // See comments in src/librustc/lib.rs
 #[doc(hidden)]

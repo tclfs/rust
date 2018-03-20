@@ -8,123 +8,86 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! This pass erases all early-bound regions from the types occuring in the MIR.
+//! This pass erases all early-bound regions from the types occurring in the MIR.
 //! We want to do this once just before trans, so trans does not have to take
 //! care erasing regions all over the place.
+//! NOTE:  We do NOT erase regions of statements that are relevant for
+//! "types-as-contracts"-validation, namely, AcquireValid, ReleaseValid, and EndRegion.
 
-use rustc::middle::ty::{self, TyCtxt};
-use rustc::mir::repr::*;
-use rustc::mir::visit::MutVisitor;
-use rustc::mir::transform::{MirPass, Pass};
-use syntax::ast::NodeId;
+use rustc::ty::subst::Substs;
+use rustc::ty::{self, Ty, TyCtxt};
+use rustc::mir::*;
+use rustc::mir::visit::{MutVisitor, TyContext};
+use transform::{MirPass, MirSource};
 
 struct EraseRegionsVisitor<'a, 'tcx: 'a> {
-    tcx: &'a TyCtxt<'tcx>,
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    in_validation_statement: bool,
 }
 
 impl<'a, 'tcx> EraseRegionsVisitor<'a, 'tcx> {
-    pub fn new(tcx: &'a TyCtxt<'tcx>) -> Self {
+    pub fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Self {
         EraseRegionsVisitor {
-            tcx: tcx
-        }
-    }
-
-    fn erase_regions_return_ty(&mut self, fn_output: &mut ty::FnOutput<'tcx>) {
-        match *fn_output {
-            ty::FnConverging(ref mut ty) => {
-                *ty = self.tcx.erase_regions(ty);
-            },
-            ty::FnDiverging => {}
-        }
-    }
-
-    fn erase_regions_tys<'b, T>(&mut self, tys: T)
-        where T: Iterator<Item = &'b mut ty::Ty<'tcx>>,
-              'tcx: 'b
-    {
-        for ty in tys {
-            *ty = self.tcx.erase_regions(ty);
+            tcx,
+            in_validation_statement: false,
         }
     }
 }
 
 impl<'a, 'tcx> MutVisitor<'tcx> for EraseRegionsVisitor<'a, 'tcx> {
-    fn visit_mir(&mut self, mir: &mut Mir<'tcx>) {
-        self.erase_regions_return_ty(&mut mir.return_ty);
-        self.erase_regions_tys(mir.var_decls.iter_mut().map(|d| &mut d.ty));
-        self.erase_regions_tys(mir.arg_decls.iter_mut().map(|d| &mut d.ty));
-        self.erase_regions_tys(mir.temp_decls.iter_mut().map(|d| &mut d.ty));
-        self.super_mir(mir);
-    }
-
-    fn visit_terminator(&mut self, bb: BasicBlock, terminator: &mut Terminator<'tcx>) {
-        match *terminator {
-            Terminator::Goto { .. } |
-            Terminator::Resume |
-            Terminator::Return |
-            Terminator::If { .. } |
-            Terminator::Switch { .. } |
-            Terminator::Drop { .. } |
-            Terminator::Call { .. } => {
-                /* nothing to do */
-            },
-            Terminator::SwitchInt { ref mut switch_ty, .. } => {
-                *switch_ty = self.tcx.erase_regions(switch_ty);
-            },
+    fn visit_ty(&mut self, ty: &mut Ty<'tcx>, _: TyContext) {
+        if !self.in_validation_statement {
+            *ty = self.tcx.erase_regions(ty);
         }
-        self.super_terminator(bb, terminator);
+        self.super_ty(ty);
     }
 
-    fn visit_rvalue(&mut self, rvalue: &mut Rvalue<'tcx>) {
-        match *rvalue {
-            Rvalue::Use(_) |
-            Rvalue::Len(_) |
-            Rvalue::BinaryOp(_, _, _) |
-            Rvalue::UnaryOp(_, _) |
-            Rvalue::Slice { input: _, from_start: _, from_end: _ } |
-            Rvalue::InlineAsm(_) => {},
+    fn visit_region(&mut self, region: &mut ty::Region<'tcx>, _: Location) {
+        *region = self.tcx.types.re_erased;
+    }
 
-            Rvalue::Repeat(_, ref mut value) => value.ty = self.tcx.erase_regions(&value.ty),
-            Rvalue::Ref(ref mut region, _, _) => *region = ty::ReStatic,
-            Rvalue::Cast(_, _, ref mut ty) => *ty = self.tcx.erase_regions(ty),
-            Rvalue::Box(ref mut ty) => *ty = self.tcx.erase_regions(ty),
+    fn visit_const(&mut self, constant: &mut &'tcx ty::Const<'tcx>, _: Location) {
+        *constant = self.tcx.erase_regions(constant);
+    }
 
+    fn visit_substs(&mut self, substs: &mut &'tcx Substs<'tcx>, _: Location) {
+        *substs = self.tcx.erase_regions(substs);
+    }
 
-            Rvalue::Aggregate(AggregateKind::Vec, _) |
-            Rvalue::Aggregate(AggregateKind::Tuple, _) => {},
-            Rvalue::Aggregate(AggregateKind::Adt(_, _, ref mut substs), _) =>
-                *substs = self.tcx.mk_substs(self.tcx.erase_regions(*substs)),
-            Rvalue::Aggregate(AggregateKind::Closure(def_id, ref mut closure_substs), _) => {
-                let cloned = Box::new(closure_substs.clone());
-                let ty = self.tcx.mk_closure_from_closure_substs(def_id, cloned);
-                let erased = self.tcx.erase_regions(&ty);
-                *closure_substs = match erased.sty {
-                    ty::TyClosure(_, ref closure_substs) => &*closure_substs,
-                    _ => unreachable!()
-                };
+    fn visit_closure_substs(&mut self,
+                            substs: &mut ty::ClosureSubsts<'tcx>,
+                            _: Location) {
+        *substs = self.tcx.erase_regions(substs);
+    }
+
+    fn visit_statement(&mut self,
+                       block: BasicBlock,
+                       statement: &mut Statement<'tcx>,
+                       location: Location) {
+        // Do NOT delete EndRegion if validation statements are emitted.
+        // Validation needs EndRegion.
+        if self.tcx.sess.opts.debugging_opts.mir_emit_validate == 0 {
+            if let StatementKind::EndRegion(_) = statement.kind {
+                statement.kind = StatementKind::Nop;
             }
         }
-        self.super_rvalue(rvalue);
-    }
 
-    fn visit_constant(&mut self, constant: &mut Constant<'tcx>) {
-        constant.ty = self.tcx.erase_regions(&constant.ty);
-        match constant.literal {
-            Literal::Item { ref mut substs, .. } => {
-                *substs = self.tcx.mk_substs(self.tcx.erase_regions(substs));
-            }
-            Literal::Value { .. } => { /* nothing to do */ }
-        }
-        self.super_constant(constant);
+        self.in_validation_statement = match statement.kind {
+            StatementKind::Validate(..) => true,
+            _ => false,
+        };
+        self.super_statement(block, statement, location);
+        self.in_validation_statement = false;
     }
 }
 
 pub struct EraseRegions;
 
-impl Pass for EraseRegions {}
-
-impl<'tcx> MirPass<'tcx> for EraseRegions {
-    fn run_pass(&mut self, tcx: &TyCtxt<'tcx>, _: NodeId, mir: &mut Mir<'tcx>) {
+impl MirPass for EraseRegions {
+    fn run_pass<'a, 'tcx>(&self,
+                          tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                          _: MirSource,
+                          mir: &mut Mir<'tcx>) {
         EraseRegionsVisitor::new(tcx).visit_mir(mir);
     }
 }

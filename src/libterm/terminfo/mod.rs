@@ -109,7 +109,7 @@ impl TermInfo {
     }
     // Keep the metadata small
     fn _from_path(path: &Path) -> Result<TermInfo, Error> {
-        let file = try!(File::open(path).map_err(|e| Error::IoError(e)));
+        let file = File::open(path).map_err(|e| Error::IoError(e))?;
         let mut reader = BufReader::new(file);
         parse(&mut reader, false).map_err(|e| Error::MalformedTerminfo(e))
     }
@@ -190,7 +190,7 @@ impl<T: Write + Send> Terminal for TerminfoTerminal<T> {
     fn reset(&mut self) -> io::Result<bool> {
         // are there any terminals that have color/attrs and not sgr0?
         // Try falling back to sgr, then op
-        let cmd = match ["sg0", "sgr", "op"]
+        let cmd = match ["sgr0", "sgr", "op"]
                             .iter()
                             .filter_map(|cap| self.ti.strings.get(*cap))
                             .next() {
@@ -231,7 +231,7 @@ impl<T: Write + Send> TerminfoTerminal<T> {
         };
 
         TerminfoTerminal {
-            out: out,
+            out,
             ti: terminfo,
             num_colors: nc,
         }

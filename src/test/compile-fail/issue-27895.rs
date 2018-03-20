@@ -14,8 +14,7 @@ fn main() {
 
     match i {
         0...index => println!("winner"),
-        //~^ ERROR paths in constants may only refer to constants or functions
-        //~| ERROR non-constant path in constant expression
+        //~^ ERROR runtime values cannot be referenced in patterns
         _ => println!("hello"),
     }
 }

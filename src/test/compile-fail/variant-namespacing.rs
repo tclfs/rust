@@ -10,22 +10,6 @@
 
 // aux-build:variant-namespacing.rs
 
-extern crate variant_namespacing;
-pub use variant_namespacing::XE::*;
-//~^ ERROR import `XStruct` conflicts with type in this module
-//~| ERROR import `XStruct` conflicts with value in this module
-//~| ERROR import `XTuple` conflicts with type in this module
-//~| ERROR import `XTuple` conflicts with value in this module
-//~| ERROR import `XUnit` conflicts with type in this module
-//~| ERROR import `XUnit` conflicts with value in this module
-pub use E::*;
-//~^ ERROR import `Struct` conflicts with type in this module
-//~| ERROR import `Struct` conflicts with value in this module
-//~| ERROR import `Tuple` conflicts with type in this module
-//~| ERROR import `Tuple` conflicts with value in this module
-//~| ERROR import `Unit` conflicts with type in this module
-//~| ERROR import `Unit` conflicts with value in this module
-
 enum E {
     Struct { a: u8 },
     Tuple(u8),
@@ -45,5 +29,15 @@ const Unit: u8 = 0;
 const XStruct: u8 = 0;
 const XTuple: u8 = 0;
 const XUnit: u8 = 0;
+
+extern crate variant_namespacing;
+pub use variant_namespacing::XE::{XStruct, XTuple, XUnit};
+//~^ ERROR the name `XStruct` is defined multiple times
+//~| ERROR the name `XTuple` is defined multiple times
+//~| ERROR the name `XUnit` is defined multiple times
+pub use E::{Struct, Tuple, Unit};
+//~^ ERROR the name `Struct` is defined multiple times
+//~| ERROR the name `Tuple` is defined multiple times
+//~| ERROR the name `Unit` is defined multiple times
 
 fn main() {}

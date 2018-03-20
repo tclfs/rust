@@ -12,15 +12,13 @@
 
 use clean;
 
-use serialize::json;
 use std::mem;
 use std::string::String;
 use std::path::PathBuf;
 
-use rustc_back::dynamic_lib as dl;
+use rustc_metadata::dynamic_lib as dl;
 
-pub type PluginJson = Option<(String, json::Json)>;
-pub type PluginResult = (clean::Crate, PluginJson);
+pub type PluginResult = clean::Crate;
 pub type PluginCallback = fn (clean::Crate) -> PluginResult;
 
 /// Manages loading and running of plugins
@@ -37,14 +35,14 @@ impl PluginManager {
         PluginManager {
             dylibs: Vec::new(),
             callbacks: Vec::new(),
-            prefix: prefix,
+            prefix,
         }
     }
 
     /// Load a plugin with the given name.
     ///
     /// Turns `name` into the proper dynamic library filename for the given
-    /// platform. On windows, it turns into name.dll, on OS X, name.dylib, and
+    /// platform. On windows, it turns into name.dll, on macOS, name.dylib, and
     /// elsewhere, libname.so.
     pub fn load_plugin(&mut self, name: String) {
         let x = self.prefix.join(libname(name));
@@ -65,15 +63,11 @@ impl PluginManager {
         self.callbacks.push(plugin);
     }
     /// Run all the loaded plugins over the crate, returning their results
-    pub fn run_plugins(&self, krate: clean::Crate) -> (clean::Crate, Vec<PluginJson> ) {
-        let mut out_json = Vec::new();
-        let mut krate = krate;
+    pub fn run_plugins(&self, mut krate: clean::Crate) -> clean::Crate {
         for &callback in &self.callbacks {
-            let (c, res) = callback(krate);
-            krate = c;
-            out_json.push(res);
+            krate = callback(krate);
         }
-        (krate, out_json)
+        krate
     }
 }
 

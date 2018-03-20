@@ -12,14 +12,11 @@
 
 // aux-build:lint_stability.rs
 
-#![allow(unused_imports)]
+#![allow(warnings)]
 
 extern crate lint_stability;
 
 use lint_stability::{unstable, deprecated}; //~ ERROR use of unstable library feature 'test_feature'
-//~^ WARNING use of deprecated item
-
-use lint_stability::unstable::{self as u}; //~ ERROR use of unstable library feature 'test_feature'
 
 fn main() {
 }

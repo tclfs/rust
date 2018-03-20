@@ -10,7 +10,9 @@
 
 // ignore-windows
 // ignore-android
-// ignore-emscripten
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
+// ignore-haiku
 
 #![feature(libc)]
 
@@ -34,7 +36,7 @@ fn main() {
 }
 
 fn parent() {
-    let file = File::open("Makefile").unwrap();
+    let file = File::open(env::current_exe().unwrap()).unwrap();
     let tcp1 = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp2 = tcp1.try_clone().unwrap();
     let addr = tcp1.local_addr().unwrap();

@@ -10,11 +10,11 @@
 
 //! Simplifying Candidates
 //!
-//! *Simplifying* a match pair `lvalue @ pattern` means breaking it down
+//! *Simplifying* a match pair `place @ pattern` means breaking it down
 //! into bindings or other, simpler match pairs. For example:
 //!
-//! - `lvalue @ (P1, P2)` can be simplified to `[lvalue.0 @ P1, lvalue.1 @ P2]`
-//! - `lvalue @ x` can be simplified to `[]` by binding `x` to `lvalue`
+//! - `place @ (P1, P2)` can be simplified to `[place.0 @ P1, place.1 @ P2]`
+//! - `place @ x` can be simplified to `[]` by binding `x` to `place`
 //!
 //! The `simplify_candidate` routine just repeatedly applies these
 //! sort of simplifications until there is nothing left to
@@ -25,13 +25,13 @@
 use build::{BlockAnd, BlockAndExtension, Builder};
 use build::matches::{Binding, MatchPair, Candidate};
 use hair::*;
-use rustc::mir::repr::*;
+use rustc::mir::*;
 
 use std::mem;
 
-impl<'a,'tcx> Builder<'a,'tcx> {
+impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn simplify_candidate<'pat>(&mut self,
-                                    mut block: BasicBlock,
+                                    block: BasicBlock,
                                     candidate: &mut Candidate<'pat, 'tcx>)
                                     -> BlockAnd<()> {
         // repeatedly simplify match pairs until fixed point is reached
@@ -39,10 +39,8 @@ impl<'a,'tcx> Builder<'a,'tcx> {
             let match_pairs = mem::replace(&mut candidate.match_pairs, vec![]);
             let mut progress = match_pairs.len(); // count how many were simplified
             for match_pair in match_pairs {
-                match self.simplify_match_pair(block, match_pair, candidate) {
-                    Ok(b) => {
-                        block = b;
-                    }
+                match self.simplify_match_pair(match_pair, candidate) {
+                    Ok(()) => {}
                     Err(match_pair) => {
                         candidate.match_pairs.push(match_pair);
                         progress -= 1; // this one was not simplified
@@ -61,22 +59,21 @@ impl<'a,'tcx> Builder<'a,'tcx> {
     /// possible, Err is returned and no changes are made to
     /// candidate.
     fn simplify_match_pair<'pat>(&mut self,
-                                 mut block: BasicBlock,
                                  match_pair: MatchPair<'pat, 'tcx>,
                                  candidate: &mut Candidate<'pat, 'tcx>)
-                                 -> Result<BasicBlock, MatchPair<'pat, 'tcx>> {
+                                 -> Result<(), MatchPair<'pat, 'tcx>> {
         match *match_pair.pattern.kind {
             PatternKind::Wild => {
                 // nothing left to do
-                Ok(block)
+                Ok(())
             }
 
             PatternKind::Binding { name, mutability, mode, var, ty, ref subpattern } => {
                 candidate.bindings.push(Binding {
-                    name: name,
-                    mutability: mutability,
+                    name,
+                    mutability,
                     span: match_pair.pattern.span,
-                    source: match_pair.lvalue.clone(),
+                    source: match_pair.place.clone(),
                     var_id: var,
                     var_ty: ty,
                     binding_mode: mode,
@@ -84,10 +81,10 @@ impl<'a,'tcx> Builder<'a,'tcx> {
 
                 if let Some(subpattern) = subpattern.as_ref() {
                     // this is the `x @ P` case; have to keep matching against `P` now
-                    candidate.match_pairs.push(MatchPair::new(match_pair.lvalue, subpattern));
+                    candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern));
                 }
 
-                Ok(block)
+                Ok(())
             }
 
             PatternKind::Constant { .. } => {
@@ -95,34 +92,60 @@ impl<'a,'tcx> Builder<'a,'tcx> {
                 Err(match_pair)
             }
 
-            PatternKind::Array { ref prefix, ref slice, ref suffix } => {
-                unpack!(block = self.prefix_suffix_slice(&mut candidate.match_pairs,
-                                                         block,
-                                                         match_pair.lvalue.clone(),
-                                                         prefix,
-                                                         slice.as_ref(),
-                                                         suffix));
-                Ok(block)
+            PatternKind::Range { .. } => {
+                Err(match_pair)
             }
 
-            PatternKind::Slice { .. } |
-            PatternKind::Range { .. } |
-            PatternKind::Variant { .. } => {
-                // cannot simplify, test is required
-                Err(match_pair)
+            PatternKind::Slice { ref prefix, ref slice, ref suffix } => {
+                if prefix.is_empty() && slice.is_some() && suffix.is_empty() {
+                    // irrefutable
+                    self.prefix_slice_suffix(&mut candidate.match_pairs,
+                                             &match_pair.place,
+                                             prefix,
+                                             slice.as_ref(),
+                                             suffix);
+                    Ok(())
+                } else {
+                    Err(match_pair)
+                }
+            }
+
+            PatternKind::Variant { adt_def, substs, variant_index, ref subpatterns } => {
+                let irrefutable = adt_def.variants.iter().enumerate().all(|(i, v)| {
+                    i == variant_index || {
+                        self.hir.tcx().features().exhaustive_patterns &&
+                        self.hir.tcx().is_variant_uninhabited_from_all_modules(v, substs)
+                    }
+                });
+                if irrefutable {
+                    let place = match_pair.place.downcast(adt_def, variant_index);
+                    candidate.match_pairs.extend(self.field_match_pairs(place, subpatterns));
+                    Ok(())
+                } else {
+                    Err(match_pair)
+                }
+            },
+
+            PatternKind::Array { ref prefix, ref slice, ref suffix } => {
+                self.prefix_slice_suffix(&mut candidate.match_pairs,
+                                         &match_pair.place,
+                                         prefix,
+                                         slice.as_ref(),
+                                         suffix);
+                Ok(())
             }
 
             PatternKind::Leaf { ref subpatterns } => {
                 // tuple struct, match subpats (if any)
                 candidate.match_pairs
-                         .extend(self.field_match_pairs(match_pair.lvalue, subpatterns));
-                Ok(block)
+                         .extend(self.field_match_pairs(match_pair.place, subpatterns));
+                Ok(())
             }
 
             PatternKind::Deref { ref subpattern } => {
-                let lvalue = match_pair.lvalue.deref();
-                candidate.match_pairs.push(MatchPair::new(lvalue, subpattern));
-                Ok(block)
+                let place = match_pair.place.deref();
+                candidate.match_pairs.push(MatchPair::new(place, subpattern));
+                Ok(())
             }
         }
     }

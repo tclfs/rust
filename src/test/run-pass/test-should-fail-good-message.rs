@@ -8,9 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-wasm32-bare compiled with panic=abort by default
 // compile-flags: --test
-// ignore-pretty: does not work well with `--test`
-
 #[test]
 #[should_panic(expected = "foo")]
 pub fn test_foo() {

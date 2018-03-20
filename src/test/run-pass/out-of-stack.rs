@@ -10,7 +10,8 @@
 
 // ignore-android: FIXME (#20004)
 // ignore-musl
-// ignore-asmjs
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 #![feature(asm)]
 #![feature(libc)]
@@ -47,8 +48,7 @@ fn check_status(status: std::process::ExitStatus)
     use std::os::unix::process::ExitStatusExt;
 
     assert!(!status.success());
-    assert!(status.signal() != Some(libc::SIGSEGV)
-            && status.signal() != Some(libc::SIGBUS));
+    assert_eq!(status.signal(), Some(libc::SIGABRT));
 }
 
 #[cfg(not(unix))]

@@ -13,26 +13,24 @@
 #![feature(quote, rustc_private)]
 
 extern crate syntax;
+extern crate syntax_pos;
 
-use syntax::codemap::DUMMY_SP;
+use syntax::codemap::FilePathMapping;
 use syntax::print::pprust::*;
-use syntax::parse::token::intern;
+use syntax::symbol::Symbol;
+use syntax_pos::DUMMY_SP;
 
 fn main() {
-    let ps = syntax::parse::ParseSess::new();
-    let mut feature_gated_cfgs = vec![];
+    syntax::with_globals(|| run());
+}
+
+fn run() {
+    let ps = syntax::parse::ParseSess::new(FilePathMapping::empty());
+    let mut resolver = syntax::ext::base::DummyResolver;
     let mut cx = syntax::ext::base::ExtCtxt::new(
-        &ps, vec![],
+        &ps,
         syntax::ext::expand::ExpansionConfig::default("qquote".to_string()),
-        &mut feature_gated_cfgs);
-    cx.bt_push(syntax::codemap::ExpnInfo {
-        call_site: DUMMY_SP,
-        callee: syntax::codemap::NameAndSpan {
-            format: syntax::codemap::MacroBang(intern("")),
-            allow_internal_unstable: false,
-            span: None,
-        }
-    });
+        &mut resolver);
     let cx = &mut cx;
 
     macro_rules! check {
@@ -96,7 +94,7 @@ fn main() {
     // quote_meta_item!
 
     let meta = quote_meta_item!(cx, cfg(foo = "bar"));
-    check!(meta_item_to_string, meta, *quote_meta_item!(cx, $meta); r#"cfg(foo = "bar")"#);
+    check!(meta_item_to_string, meta, quote_meta_item!(cx, $meta); r#"cfg(foo = "bar")"#);
 
     let attr = quote_attr!(cx, #![$meta]);
     check!(attribute_to_string, attr; r#"#![cfg(foo = "bar")]"#);

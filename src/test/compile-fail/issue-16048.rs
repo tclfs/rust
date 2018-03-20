@@ -10,6 +10,7 @@
 
 trait NoLifetime {
     fn get<'p, T : Test<'p>>(&self) -> T;
+    //~^ NOTE lifetimes in impl do not match this method in trait
 }
 
 trait Test<'p> {
@@ -28,7 +29,8 @@ impl<'a> Test<'a> for Foo<'a> {
 
 impl<'a> NoLifetime for Foo<'a> {
     fn get<'p, T : Test<'a>>(&self) -> T {
-//~^ ERROR lifetime parameters or bounds on method `get` do not match the trait declaration
+    //~^ ERROR E0195
+    //~| NOTE lifetimes do not match method in trait
         return *self as T;
     }
 }

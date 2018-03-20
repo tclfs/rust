@@ -14,7 +14,5 @@ fn main() {
     let f;
     f = box f;
     //~^ ERROR mismatched types
-    //~| expected `_`
-    //~| found `Box<_>`
     //~| cyclic type of infinite size
 }

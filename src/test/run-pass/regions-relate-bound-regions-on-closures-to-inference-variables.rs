@@ -31,7 +31,6 @@ struct Foo<'a,'tcx:'a> {
 
 impl<'a,'tcx> Foo<'a,'tcx> {
     fn bother(&mut self) -> isize {
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         self.elaborate_bounds(Box::new(|this| {
             // (*) Here: type of `this` is `&'f0 Foo<&'f1, '_2>`,
             // where `'f0` and `'f1` are fresh, free regions that
@@ -43,7 +42,7 @@ impl<'a,'tcx> Foo<'a,'tcx> {
             // inferring `'_2` to be `'static` in this case, because
             // it is created outside the closure but then related to
             // regions bound by the closure itself. See the
-            // `region_inference.rs` file (and the `givens` field, in
+            // `region_constraints.rs` file (and the `givens` field, in
             // particular) for more details.
             this.foo()
         }))
@@ -63,7 +62,7 @@ impl<'a,'tcx> Foo<'a,'tcx> {
 }
 
 fn main() {
-    let v = vec!();
+    let v = vec![];
     let cx = Ctxt { x: &v };
     let mut foo = Foo { cx: &cx };
     assert_eq!(foo.bother(), 22); // just so the code is not dead, basically

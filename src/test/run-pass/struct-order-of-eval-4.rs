@@ -11,8 +11,6 @@
 // Checks that struct-literal expression order-of-eval is as expected
 // even when no Drop-implementations are involved.
 
-#![feature(const_fn)]
-
 use std::sync::atomic::{Ordering, AtomicUsize};
 
 struct W { wrapped: u32 }

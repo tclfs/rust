@@ -12,8 +12,8 @@
 
 mod foo {
     use baz::bar;
-    //~^ ERROR import `bar` conflicts with existing submodule
     mod bar {}
+    //~^ ERROR the name `bar` is defined multiple times
 }
 mod baz { pub mod bar {} }
 

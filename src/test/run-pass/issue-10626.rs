@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 // Make sure that if a process doesn't have its stdio/stderr descriptors set up
 // that we don't die in a large ball of fire

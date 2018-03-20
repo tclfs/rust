@@ -10,7 +10,14 @@
 
 import gdb
 import re
+import sys
 import debugger_pretty_printers_common as rustpp
+
+# We want a version of `range` which doesn't allocate an intermediate list,
+# specifically it should use a lazy iterator. In Python 2 this was `xrange`, but
+# if we're running with Python 3 then we need to use `range` instead.
+if sys.version_info[0] >= 3:
+    xrange = range
 
 #===============================================================================
 # GDB Pretty Printing Module for Rust
@@ -29,7 +36,7 @@ class GdbType(rustpp.Type):
         if tag is None:
             return tag
 
-        return tag.replace("&'static ", "&")
+        return rustpp.extract_type_name(tag).replace("&'static ", "&")
 
     def get_dwarf_type_kind(self):
         if self.ty.code == gdb.TYPE_CODE_STRUCT:
@@ -70,6 +77,9 @@ class GdbValue(rustpp.Value):
         return child
 
     def as_integer(self):
+        if self.gdb_val.type.code == gdb.TYPE_CODE_PTR:
+            as_str = rustpp.compat_str(self.gdb_val).split()[0]
+            return int(as_str, 0)
         return int(self.gdb_val)
 
     def get_wrapped_value(self):
@@ -90,8 +100,10 @@ def rust_pretty_printer_lookup_function(gdb_val):
     val = GdbValue(gdb_val)
     type_kind = val.type.get_type_kind()
 
-    if (type_kind == rustpp.TYPE_KIND_REGULAR_STRUCT or
-        type_kind == rustpp.TYPE_KIND_EMPTY):
+    if type_kind == rustpp.TYPE_KIND_EMPTY:
+        return RustEmptyPrinter(val)
+
+    if type_kind == rustpp.TYPE_KIND_REGULAR_STRUCT:
         return RustStructPrinter(val,
                                  omit_first_field = False,
                                  omit_type_name = False,
@@ -114,6 +126,9 @@ def rust_pretty_printer_lookup_function(gdb_val):
 
     if type_kind == rustpp.TYPE_KIND_STD_STRING:
         return RustStdStringPrinter(val)
+
+    if type_kind == rustpp.TYPE_KIND_OS_STRING:
+        return RustOsStringPrinter(val)
 
     if type_kind == rustpp.TYPE_KIND_TUPLE:
         return RustStructPrinter(val,
@@ -161,7 +176,15 @@ def rust_pretty_printer_lookup_function(gdb_val):
 #=------------------------------------------------------------------------------
 # Pretty Printer Classes
 #=------------------------------------------------------------------------------
-class RustStructPrinter:
+class RustEmptyPrinter(object):
+    def __init__(self, val):
+        self.__val = val
+
+    def to_string(self):
+        return self.__val.type.get_unqualified_type_name()
+
+
+class RustStructPrinter(object):
     def __init__(self, val, omit_first_field, omit_type_name, is_tuple_like):
         self.__val = val
         self.__omit_first_field = omit_first_field
@@ -177,10 +200,10 @@ class RustStructPrinter:
         cs = []
         wrapped_value = self.__val.get_wrapped_value()
 
-        for field in self.__val.type.get_fields():
+        for number, field in enumerate(self.__val.type.get_fields()):
             field_value = wrapped_value[field.name]
             if self.__is_tuple_like:
-                cs.append(("", field_value))
+                cs.append((str(number), field_value))
             else:
                 cs.append((field.name, field_value))
 
@@ -196,11 +219,12 @@ class RustStructPrinter:
             return ""
 
 
-class RustSlicePrinter:
+class RustSlicePrinter(object):
     def __init__(self, val):
         self.__val = val
 
-    def display_hint(self):
+    @staticmethod
+    def display_hint():
         return "array"
 
     def to_string(self):
@@ -209,32 +233,33 @@ class RustSlicePrinter:
                 ("(len: %i)" % length))
 
     def children(self):
-        cs = []
         (length, data_ptr) = rustpp.extract_length_and_ptr_from_slice(self.__val)
         assert data_ptr.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_PTR
         raw_ptr = data_ptr.get_wrapped_value()
 
-        for index in range(0, length):
-            cs.append((str(index), (raw_ptr + index).dereference()))
-
-        return cs
+        for index in xrange(0, length):
+            yield (str(index), (raw_ptr + index).dereference())
 
 
-class RustStringSlicePrinter:
+class RustStringSlicePrinter(object):
     def __init__(self, val):
         self.__val = val
 
     def to_string(self):
         (length, data_ptr) = rustpp.extract_length_and_ptr_from_slice(self.__val)
         raw_ptr = data_ptr.get_wrapped_value()
-        return '"%s"' % raw_ptr.string(encoding="utf-8", length=length)
+        return raw_ptr.lazy_string(encoding="utf-8", length=length)
+
+    def display_hint(self):
+        return "string"
 
 
-class RustStdVecPrinter:
+class RustStdVecPrinter(object):
     def __init__(self, val):
         self.__val = val
 
-    def display_hint(self):
+    @staticmethod
+    def display_hint():
         return "array"
 
     def to_string(self):
@@ -243,26 +268,43 @@ class RustStdVecPrinter:
                 ("(len: %i, cap: %i)" % (length, cap)))
 
     def children(self):
-        cs = []
         (length, data_ptr, cap) = rustpp.extract_length_ptr_and_cap_from_std_vec(self.__val)
         gdb_ptr = data_ptr.get_wrapped_value()
-        for index in range(0, length):
-            cs.append((str(index), (gdb_ptr + index).dereference()))
-        return cs
+        for index in xrange(0, length):
+            yield (str(index), (gdb_ptr + index).dereference())
 
 
-class RustStdStringPrinter:
+class RustStdStringPrinter(object):
     def __init__(self, val):
         self.__val = val
 
     def to_string(self):
         vec = self.__val.get_child_at_index(0)
         (length, data_ptr, cap) = rustpp.extract_length_ptr_and_cap_from_std_vec(vec)
-        return '"%s"' % data_ptr.get_wrapped_value().string(encoding="utf-8",
-                                                            length=length)
+        return data_ptr.get_wrapped_value().lazy_string(encoding="utf-8",
+                                                        length=length)
 
+    def display_hint(self):
+        return "string"
 
-class RustCStyleVariantPrinter:
+class RustOsStringPrinter(object):
+    def __init__(self, val):
+        self.__val = val
+
+    def to_string(self):
+        buf = self.__val.get_child_at_index(0)
+        vec = buf.get_child_at_index(0)
+        if vec.type.get_unqualified_type_name() == "Wtf8Buf":
+            vec = vec.get_child_at_index(0)
+
+        (length, data_ptr, cap) = rustpp.extract_length_ptr_and_cap_from_std_vec(
+            vec)
+        return data_ptr.get_wrapped_value().lazy_string(length=length)
+
+    def display_hint(self):
+        return "string"
+
+class RustCStyleVariantPrinter(object):
     def __init__(self, val):
         assert val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_ENUM
         self.__val = val
@@ -271,7 +313,7 @@ class RustCStyleVariantPrinter:
         return str(self.__val.get_wrapped_value())
 
 
-class IdentityPrinter:
+class IdentityPrinter(object):
     def __init__(self, string):
         self.string = string
 

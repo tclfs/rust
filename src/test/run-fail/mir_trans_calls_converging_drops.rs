@@ -8,26 +8,21 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
-
 // error-pattern:converging_fn called
 // error-pattern:0 dropped
 // error-pattern:exit
 
-use std::io::{self, Write};
-
 struct Droppable(u8);
 impl Drop for Droppable {
     fn drop(&mut self) {
-        write!(io::stderr(), "{} dropped\n", self.0);
+        eprintln!("{} dropped", self.0);
     }
 }
 
 fn converging_fn() {
-    write!(io::stderr(), "converging_fn called\n");
+    eprintln!("converging_fn called");
 }
 
-#[rustc_mir]
 fn mir(d: Droppable) {
     converging_fn();
 }

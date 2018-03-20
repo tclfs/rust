@@ -10,11 +10,13 @@
 
 //! Test that when a crate is linked under another name that name is used in global paths
 
-extern crate core as bar;
+// aux-build:issue_1920.rs
+
+extern crate issue_1920 as bar;
 
 fn assert_clone<T>() where T : Clone { }
 
 fn main() {
-    assert_clone::<bar::sync::atomic::AtomicBool>();
-    //~^ ERROR the trait `bar::clone::Clone` is not implemented for the type `bar::sync::atomic::
+    assert_clone::<bar::S>();
+    //~^ ERROR `bar::S: std::clone::Clone` is not satisfied
 }

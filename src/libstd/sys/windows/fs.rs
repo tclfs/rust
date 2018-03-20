@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-use io::prelude::*;
 use os::windows::prelude::*;
 
 use ffi::OsString;
@@ -39,9 +37,10 @@ pub struct FileAttr {
     reparse_tag: c::DWORD,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum FileType {
-    Dir, File, SymlinkFile, SymlinkDir, ReparsePoint, MountPoint,
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct FileType {
+    attributes: c::DWORD,
+    reparse_tag: c::DWORD,
 }
 
 pub struct ReadDir {
@@ -60,7 +59,7 @@ pub struct DirEntry {
     data: c::WIN32_FIND_DATAW,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OpenOptions {
     // generic
     read: bool,
@@ -81,7 +80,16 @@ pub struct OpenOptions {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FilePermissions { attrs: c::DWORD }
 
+#[derive(Debug)]
 pub struct DirBuilder;
+
+impl fmt::Debug for ReadDir {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // This will only be called from std::fs::ReadDir, which will add a "ReadDir()" frame.
+        // Thus the result will be e g 'ReadDir("C:\")'
+        fmt::Debug::fmt(&*self.root, f)
+    }
+}
 
 impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
@@ -120,8 +128,8 @@ impl DirEntry {
     fn new(root: &Arc<PathBuf>, wfd: &c::WIN32_FIND_DATAW) -> Option<DirEntry> {
         match &wfd.cFileName[0..3] {
             // check for '.' and '..'
-            [46, 0, ..] |
-            [46, 46, 0, ..] => return None,
+            &[46, 0, ..] |
+            &[46, 46, 0, ..] => return None,
             _ => {}
         }
 
@@ -202,7 +210,7 @@ impl OpenOptions {
         const ERROR_INVALID_PARAMETER: i32 = 87;
 
         match (self.read, self.write, self.append, self.access_mode) {
-            (_, _, _, Some(mode)) => Ok(mode),
+            (.., Some(mode)) => Ok(mode),
             (true,  false, false, None) => Ok(c::GENERIC_READ),
             (false, true,  false, None) => Ok(c::GENERIC_WRITE),
             (true,  true,  false, None) => Ok(c::GENERIC_READ | c::GENERIC_WRITE),
@@ -248,13 +256,13 @@ impl OpenOptions {
 
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        let path = try!(to_u16s(path));
+        let path = to_u16s(path)?;
         let handle = unsafe {
             c::CreateFileW(path.as_ptr(),
-                           try!(opts.get_access_mode()),
+                           opts.get_access_mode()?,
                            opts.share_mode,
                            opts.security_attributes as *mut _,
-                           try!(opts.get_creation_mode()),
+                           opts.get_creation_mode()?,
                            opts.get_flags_and_attributes(),
                            ptr::null_mut())
         };
@@ -266,7 +274,7 @@ impl File {
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        try!(cvt(unsafe { c::FlushFileBuffers(self.handle.raw()) }));
+        cvt(unsafe { c::FlushFileBuffers(self.handle.raw()) })?;
         Ok(())
     }
 
@@ -277,20 +285,20 @@ impl File {
             EndOfFile: size as c::LARGE_INTEGER,
         };
         let size = mem::size_of_val(&info);
-        try!(cvt(unsafe {
+        cvt(unsafe {
             c::SetFileInformationByHandle(self.handle.raw(),
                                           c::FileEndOfFileInfo,
                                           &mut info as *mut _ as *mut _,
                                           size as c::DWORD)
-        }));
+        })?;
         Ok(())
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         unsafe {
             let mut info: c::BY_HANDLE_FILE_INFORMATION = mem::zeroed();
-            try!(cvt(c::GetFileInformationByHandle(self.handle.raw(),
-                                                   &mut info)));
+            cvt(c::GetFileInformationByHandle(self.handle.raw(),
+                                              &mut info))?;
             let mut attr = FileAttr {
                 attributes: info.dwFileAttributes,
                 creation_time: info.ftCreationTime,
@@ -313,34 +321,40 @@ impl File {
         self.handle.read(buf)
     }
 
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.handle.read_to_end(buf)
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        self.handle.read_at(buf, offset)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.handle.write(buf)
     }
 
+    pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        self.handle.write_at(buf, offset)
+    }
+
     pub fn flush(&self) -> io::Result<()> { Ok(()) }
 
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
         let (whence, pos) = match pos {
+            // Casting to `i64` is fine, `SetFilePointerEx` reinterprets this
+            // integer as `u64`.
             SeekFrom::Start(n) => (c::FILE_BEGIN, n as i64),
             SeekFrom::End(n) => (c::FILE_END, n),
             SeekFrom::Current(n) => (c::FILE_CURRENT, n),
         };
         let pos = pos as c::LARGE_INTEGER;
         let mut newpos = 0;
-        try!(cvt(unsafe {
+        cvt(unsafe {
             c::SetFilePointerEx(self.handle.raw(), pos,
                                 &mut newpos, whence)
-        }));
+        })?;
         Ok(newpos as u64)
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
         Ok(File {
-            handle: try!(self.handle.duplicate(0, true, c::DUPLICATE_SAME_ACCESS)),
+            handle: self.handle.duplicate(0, true, c::DUPLICATE_SAME_ACCESS)?,
         })
     }
 
@@ -353,7 +367,7 @@ impl File {
                          -> io::Result<(c::DWORD, &'a c::REPARSE_DATA_BUFFER)> {
         unsafe {
             let mut bytes = 0;
-            try!(cvt({
+            cvt({
                 c::DeviceIoControl(self.handle.raw(),
                                    c::FSCTL_GET_REPARSE_POINT,
                                    ptr::null_mut(),
@@ -362,14 +376,14 @@ impl File {
                                    space.len() as c::DWORD,
                                    &mut bytes,
                                    ptr::null_mut())
-            }));
+            })?;
             Ok((bytes, &*(space.as_ptr() as *const c::REPARSE_DATA_BUFFER)))
         }
     }
 
     fn readlink(&self) -> io::Result<PathBuf> {
         let mut space = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-        let (_bytes, buf) = try!(self.reparse_point(&mut space));
+        let (_bytes, buf) = self.reparse_point(&mut space)?;
         unsafe {
             let (path_buffer, subst_off, subst_len, relative) = match buf.ReparseTag {
                 c::IO_REPARSE_TAG_SYMLINK => {
@@ -400,6 +414,24 @@ impl File {
             }
             Ok(PathBuf::from(OsString::from_wide(subst)))
         }
+    }
+
+    pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
+        let mut info = c::FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: perm.attrs,
+        };
+        let size = mem::size_of_val(&info);
+        cvt(unsafe {
+            c::SetFileInformationByHandle(self.handle.raw(),
+                                          c::FileBasicInfo,
+                                          &mut info as *mut _ as *mut _,
+                                          size as c::DWORD)
+        })?;
+        Ok(())
     }
 }
 
@@ -485,30 +517,34 @@ impl FilePermissions {
 
 impl FileType {
     fn new(attrs: c::DWORD, reparse_tag: c::DWORD) -> FileType {
-        match (attrs & c::FILE_ATTRIBUTE_DIRECTORY != 0,
-               attrs & c::FILE_ATTRIBUTE_REPARSE_POINT != 0,
-               reparse_tag) {
-            (false, false, _) => FileType::File,
-            (true, false, _) => FileType::Dir,
-            (false, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkFile,
-            (true, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkDir,
-            (true, true, c::IO_REPARSE_TAG_MOUNT_POINT) => FileType::MountPoint,
-            (_, true, _) => FileType::ReparsePoint,
-            // Note: if a _file_ has a reparse tag of the type IO_REPARSE_TAG_MOUNT_POINT it is
-            // invalid, as junctions always have to be dirs. We set the filetype to ReparsePoint
-            // to indicate it is something symlink-like, but not something you can follow.
+        FileType {
+            attributes: attrs,
+            reparse_tag: reparse_tag,
         }
     }
-
-    pub fn is_dir(&self) -> bool { *self == FileType::Dir }
-    pub fn is_file(&self) -> bool { *self == FileType::File }
+    pub fn is_dir(&self) -> bool {
+        !self.is_symlink() && self.is_directory()
+    }
+    pub fn is_file(&self) -> bool {
+        !self.is_symlink() && !self.is_directory()
+    }
     pub fn is_symlink(&self) -> bool {
-        *self == FileType::SymlinkFile ||
-        *self == FileType::SymlinkDir ||
-        *self == FileType::MountPoint
+        self.is_reparse_point() && self.is_reparse_tag_name_surrogate()
     }
     pub fn is_symlink_dir(&self) -> bool {
-        *self == FileType::SymlinkDir || *self == FileType::MountPoint
+        self.is_symlink() && self.is_directory()
+    }
+    pub fn is_symlink_file(&self) -> bool {
+        self.is_symlink() && !self.is_directory()
+    }
+    fn is_directory(&self) -> bool {
+        self.attributes & c::FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+    fn is_reparse_point(&self) -> bool {
+        self.attributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    fn is_reparse_tag_name_surrogate(&self) -> bool {
+        self.reparse_tag & 0x20000000 != 0
     }
 }
 
@@ -516,10 +552,10 @@ impl DirBuilder {
     pub fn new() -> DirBuilder { DirBuilder }
 
     pub fn mkdir(&self, p: &Path) -> io::Result<()> {
-        let p = try!(to_u16s(p));
-        try!(cvt(unsafe {
+        let p = to_u16s(p)?;
+        cvt(unsafe {
             c::CreateDirectoryW(p.as_ptr(), ptr::null_mut())
-        }));
+        })?;
         Ok(())
     }
 }
@@ -527,7 +563,7 @@ impl DirBuilder {
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
     let root = p.to_path_buf();
     let star = p.join("*");
-    let path = try!(to_u16s(&star));
+    let path = to_u16s(&star)?;
 
     unsafe {
         let mut wfd = mem::zeroed();
@@ -545,28 +581,28 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
-    let p_u16s = try!(to_u16s(p));
-    try!(cvt(unsafe { c::DeleteFileW(p_u16s.as_ptr()) }));
+    let p_u16s = to_u16s(p)?;
+    cvt(unsafe { c::DeleteFileW(p_u16s.as_ptr()) })?;
     Ok(())
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    let old = try!(to_u16s(old));
-    let new = try!(to_u16s(new));
-    try!(cvt(unsafe {
+    let old = to_u16s(old)?;
+    let new = to_u16s(new)?;
+    cvt(unsafe {
         c::MoveFileExW(old.as_ptr(), new.as_ptr(), c::MOVEFILE_REPLACE_EXISTING)
-    }));
+    })?;
     Ok(())
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    let p = try!(to_u16s(p));
-    try!(cvt(unsafe { c::RemoveDirectoryW(p.as_ptr()) }));
+    let p = to_u16s(p)?;
+    cvt(unsafe { c::RemoveDirectoryW(p.as_ptr()) })?;
     Ok(())
 }
 
 pub fn remove_dir_all(path: &Path) -> io::Result<()> {
-    let filetype = try!(lstat(path)).file_type();
+    let filetype = lstat(path)?.file_type();
     if filetype.is_symlink() {
         // On Windows symlinks to files and directories are removed differently.
         // rmdir only deletes dir symlinks and junctions, not file symlinks.
@@ -577,15 +613,15 @@ pub fn remove_dir_all(path: &Path) -> io::Result<()> {
 }
 
 fn remove_dir_all_recursive(path: &Path) -> io::Result<()> {
-    for child in try!(readdir(path)) {
-        let child = try!(child);
-        let child_type = try!(child.file_type());
+    for child in readdir(path)? {
+        let child = child?;
+        let child_type = child.file_type()?;
         if child_type.is_dir() {
-            try!(remove_dir_all_recursive(&child.path()));
+            remove_dir_all_recursive(&child.path())?;
         } else if child_type.is_symlink_dir() {
-            try!(rmdir(&child.path()));
+            rmdir(&child.path())?;
         } else {
-            try!(unlink(&child.path()));
+            unlink(&child.path())?;
         }
     }
     rmdir(path)
@@ -599,7 +635,7 @@ pub fn readlink(path: &Path) -> io::Result<PathBuf> {
     opts.access_mode(0);
     opts.custom_flags(c::FILE_FLAG_OPEN_REPARSE_POINT |
                       c::FILE_FLAG_BACKUP_SEMANTICS);
-    let file = try!(File::open(&path, &opts));
+    let file = File::open(&path, &opts)?;
     file.readlink()
 }
 
@@ -608,21 +644,37 @@ pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 pub fn symlink_inner(src: &Path, dst: &Path, dir: bool) -> io::Result<()> {
-    let src = try!(to_u16s(src));
-    let dst = try!(to_u16s(dst));
+    let src = to_u16s(src)?;
+    let dst = to_u16s(dst)?;
     let flags = if dir { c::SYMBOLIC_LINK_FLAG_DIRECTORY } else { 0 };
-    try!(cvt(unsafe {
-        c::CreateSymbolicLinkW(dst.as_ptr(), src.as_ptr(), flags) as c::BOOL
-    }));
+    // Formerly, symlink creation required the SeCreateSymbolicLink privilege. For the Windows 10
+    // Creators Update, Microsoft loosened this to allow unprivileged symlink creation if the
+    // computer is in Developer Mode, but SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE must be
+    // added to dwFlags to opt into this behaviour.
+    let result = cvt(unsafe {
+        c::CreateSymbolicLinkW(dst.as_ptr(), src.as_ptr(),
+                               flags | c::SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) as c::BOOL
+    });
+    if let Err(err) = result {
+        if err.raw_os_error() == Some(c::ERROR_INVALID_PARAMETER as i32) {
+            // Older Windows objects to SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+            // so if we encounter ERROR_INVALID_PARAMETER, retry without that flag.
+            cvt(unsafe {
+                c::CreateSymbolicLinkW(dst.as_ptr(), src.as_ptr(), flags) as c::BOOL
+            })?;
+        } else {
+            return Err(err);
+        }
+    }
     Ok(())
 }
 
 pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
-    let src = try!(to_u16s(src));
-    let dst = try!(to_u16s(dst));
-    try!(cvt(unsafe {
+    let src = to_u16s(src)?;
+    let dst = to_u16s(dst)?;
+    cvt(unsafe {
         c::CreateHardLinkW(dst.as_ptr(), src.as_ptr(), ptr::null_mut())
-    }));
+    })?;
     Ok(())
 }
 
@@ -632,7 +684,7 @@ pub fn stat(path: &Path) -> io::Result<FileAttr> {
     opts.access_mode(0);
     // This flag is so we can open directories too
     opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS);
-    let file = try!(File::open(path, &opts));
+    let file = File::open(path, &opts)?;
     file.file_attr()
 }
 
@@ -641,14 +693,14 @@ pub fn lstat(path: &Path) -> io::Result<FileAttr> {
     // No read or write permissions are necessary
     opts.access_mode(0);
     opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS | c::FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = try!(File::open(path, &opts));
+    let file = File::open(path, &opts)?;
     file.file_attr()
 }
 
 pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
-    let p = try!(to_u16s(p));
+    let p = to_u16s(p)?;
     unsafe {
-        try!(cvt(c::SetFileAttributesW(p.as_ptr(), perm.attrs)));
+        cvt(c::SetFileAttributesW(p.as_ptr(), perm.attrs))?;
         Ok(())
     }
 }
@@ -668,32 +720,32 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     opts.access_mode(0);
     // This flag is so we can open directories too
     opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS);
-    let f = try!(File::open(p, &opts));
+    let f = File::open(p, &opts)?;
     get_path(&f)
 }
 
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     unsafe extern "system" fn callback(
         _TotalFileSize: c::LARGE_INTEGER,
-        TotalBytesTransferred: c::LARGE_INTEGER,
+        _TotalBytesTransferred: c::LARGE_INTEGER,
         _StreamSize: c::LARGE_INTEGER,
-        _StreamBytesTransferred: c::LARGE_INTEGER,
-        _dwStreamNumber: c::DWORD,
+        StreamBytesTransferred: c::LARGE_INTEGER,
+        dwStreamNumber: c::DWORD,
         _dwCallbackReason: c::DWORD,
         _hSourceFile: c::HANDLE,
         _hDestinationFile: c::HANDLE,
         lpData: c::LPVOID,
     ) -> c::DWORD {
-        *(lpData as *mut i64) = TotalBytesTransferred;
+        if dwStreamNumber == 1 {*(lpData as *mut i64) = StreamBytesTransferred;}
         c::PROGRESS_CONTINUE
     }
-    let pfrom = try!(to_u16s(from));
-    let pto = try!(to_u16s(to));
+    let pfrom = to_u16s(from)?;
+    let pto = to_u16s(to)?;
     let mut size = 0i64;
-    try!(cvt(unsafe {
+    cvt(unsafe {
         c::CopyFileExW(pfrom.as_ptr(), pto.as_ptr(), Some(callback),
                        &mut size as *mut _ as *mut _, ptr::null_mut(), 0)
-    }));
+    })?;
     Ok(size as u64)
 }
 
@@ -710,20 +762,20 @@ pub fn symlink_junction<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::R
 #[allow(dead_code)]
 fn symlink_junction_inner(target: &Path, junction: &Path) -> io::Result<()> {
     let d = DirBuilder::new();
-    try!(d.mkdir(&junction));
+    d.mkdir(&junction)?;
 
     let mut opts = OpenOptions::new();
     opts.write(true);
     opts.custom_flags(c::FILE_FLAG_OPEN_REPARSE_POINT |
                       c::FILE_FLAG_BACKUP_SEMANTICS);
-    let f = try!(File::open(junction, &opts));
+    let f = File::open(junction, &opts)?;
     let h = f.handle().raw();
 
     unsafe {
         let mut data = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-        let mut db = data.as_mut_ptr()
-                        as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
-        let buf = &mut (*db).ReparseTarget as *mut _;
+        let db = data.as_mut_ptr()
+                    as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
+        let buf = &mut (*db).ReparseTarget as *mut c::WCHAR;
         let mut i = 0;
         // FIXME: this conversion is very hacky
         let v = br"\??\";

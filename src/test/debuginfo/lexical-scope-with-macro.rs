@@ -9,8 +9,9 @@
 // except according to those terms.
 
 // min-lldb-version: 310
+// ignore-macos FIXME #48807
 
-// compile-flags:-g
+// compile-flags:-g -Zdebug-macros
 
 // === GDB TESTS ===================================================================================
 

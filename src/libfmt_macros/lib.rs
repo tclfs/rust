@@ -14,19 +14,12 @@
 //! Parsing does not happen at runtime: structures of `std::fmt::rt` are
 //! generated instead.
 
-#![crate_name = "fmt_macros"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        html_playground_url = "https://play.rust-lang.org/",
        test(attr(deny(warnings))))]
-#![cfg_attr(not(stage0), deny(warnings))]
-
-#![feature(staged_api)]
-#![feature(unicode)]
+#![deny(warnings)]
 
 pub use self::Piece::*;
 pub use self::Position::*;
@@ -80,9 +73,9 @@ pub struct FormatSpec<'a> {
 /// Enum describing where an argument for a format can be located.
 #[derive(Copy, Clone, PartialEq)]
 pub enum Position<'a> {
-    /// The argument will be in the next position. This is the default.
-    ArgumentNext,
-    /// The argument is located at a specific index.
+    /// The argument is implied to be located at an index
+    ArgumentImplicitlyIs(usize),
+    /// The argument is located at a specific index given in the format
     ArgumentIs(usize),
     /// The argument has a name.
     ArgumentNamed(&'a str),
@@ -115,6 +108,10 @@ pub enum Flag {
     /// For numbers, this means that the number will be padded with zeroes,
     /// and the sign (`+` or `-`) will precede them.
     FlagSignAwareZeroPad,
+    /// For Debug / `?`, format integers in lower-case hexadecimal.
+    FlagDebugLowerHex,
+    /// For Debug / `?`, format integers in upper-case hexadecimal.
+    FlagDebugUpperHex,
 }
 
 /// A count is used for the precision and width parameters of an integer, and
@@ -127,8 +124,6 @@ pub enum Count<'a> {
     CountIsName(&'a str),
     /// The count is specified by the argument at the given index.
     CountIsParam(usize),
-    /// The count is specified by the next parameter.
-    CountIsNextParam,
     /// The count is implied and cannot be explicitly specified.
     CountImplied,
 }
@@ -143,7 +138,9 @@ pub struct Parser<'a> {
     input: &'a str,
     cur: iter::Peekable<str::CharIndices<'a>>,
     /// Error messages accumulated during parsing
-    pub errors: Vec<string::String>,
+    pub errors: Vec<(string::String, Option<string::String>)>,
+    /// Current position of implicit positional argument pointer
+    curarg: usize,
 }
 
 impl<'a> Iterator for Parser<'a> {
@@ -167,7 +164,9 @@ impl<'a> Iterator for Parser<'a> {
                     if self.consume('}') {
                         Some(String(self.string(pos + 1)))
                     } else {
-                        self.err("unmatched `}` found");
+                        self.err_with_note("unmatched `}` found",
+                                           "if you intended to print `}`, \
+                                           you can escape it using `}}`");
                         None
                     }
                 }
@@ -186,6 +185,7 @@ impl<'a> Parser<'a> {
             input: s,
             cur: s.char_indices().peekable(),
             errors: vec![],
+            curarg: 0,
         }
     }
 
@@ -193,7 +193,14 @@ impl<'a> Parser<'a> {
     /// String, but I think it does when this eventually uses conditions so it
     /// might as well start using it now.
     fn err(&mut self, msg: &str) {
-        self.errors.push(msg.to_owned());
+        self.errors.push((msg.to_owned(), None));
+    }
+
+    /// Notifies of an error. The message doesn't actually need to be of type
+    /// String, but I think it does when this eventually uses conditions so it
+    /// might as well start using it now.
+    fn err_with_note(&mut self, msg: &str, note: &str) {
+        self.errors.push((msg.to_owned(), Some(note.to_owned())));
     }
 
     /// Optionally consumes the specified character. If the character is not at
@@ -223,7 +230,13 @@ impl<'a> Parser<'a> {
                 self.err(&format!("expected `{:?}`, found `{:?}`", c, maybe));
             }
         } else {
-            self.err(&format!("expected `{:?}` but string was terminated", c));
+            let msg = &format!("expected `{:?}` but string was terminated", c);
+            if c == '}' {
+                self.err_with_note(msg,
+                                   "if you intended to print `{`, you can escape it using `{{`");
+            } else {
+                self.err(msg);
+            }
         }
     }
 
@@ -259,21 +272,40 @@ impl<'a> Parser<'a> {
     /// Parses an Argument structure, or what's contained within braces inside
     /// the format string
     fn argument(&mut self) -> Argument<'a> {
+        let pos = self.position();
+        let format = self.format();
+
+        // Resolve position after parsing format spec.
+        let pos = match pos {
+            Some(position) => position,
+            None => {
+                let i = self.curarg;
+                self.curarg += 1;
+                ArgumentImplicitlyIs(i)
+            }
+        };
+
         Argument {
-            position: self.position(),
-            format: self.format(),
+            position: pos,
+            format,
         }
     }
 
     /// Parses a positional argument for a format. This could either be an
     /// integer index of an argument, a named argument, or a blank string.
-    fn position(&mut self) -> Position<'a> {
+    /// Returns `Some(parsed_position)` if the position is not implicitly
+    /// consuming a macro argument, `None` if it's the case.
+    fn position(&mut self) -> Option<Position<'a>> {
         if let Some(i) = self.integer() {
-            ArgumentIs(i)
+            Some(ArgumentIs(i))
         } else {
             match self.cur.peek() {
-                Some(&(_, c)) if c.is_alphabetic() => ArgumentNamed(self.word()),
-                _ => ArgumentNext,
+                Some(&(_, c)) if c.is_alphabetic() => Some(ArgumentNamed(self.word())),
+
+                // This is an `ArgumentNext`.
+                // Record the fact and do the resolution after parsing the
+                // format spec, to make things like `{:.*}` work.
+                _ => None,
             }
         }
     }
@@ -340,13 +372,31 @@ impl<'a> Parser<'a> {
         }
         if self.consume('.') {
             if self.consume('*') {
-                spec.precision = CountIsNextParam;
+                // Resolve `CountIsNextParam`.
+                // We can do this immediately as `position` is resolved later.
+                let i = self.curarg;
+                self.curarg += 1;
+                spec.precision = CountIsParam(i);
             } else {
                 spec.precision = self.count();
             }
         }
-        // Finally the actual format specifier
-        if self.consume('?') {
+        // Optional radix followed by the actual format specifier
+        if self.consume('x') {
+            if self.consume('?') {
+                spec.flags |= 1 << (FlagDebugLowerHex as u32);
+                spec.ty = "?";
+            } else {
+                spec.ty = "x";
+            }
+        } else if self.consume('X') {
+            if self.consume('?') {
+                spec.flags |= 1 << (FlagDebugUpperHex as u32);
+                spec.ty = "?";
+            } else {
+                spec.ty = "X";
+            }
+        } else if self.consume('?') {
             spec.ty = "?";
         } else {
             spec.ty = self.word();
@@ -487,7 +537,7 @@ mod tests {
     fn format_nothing() {
         same("{}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: fmtdflt(),
                })]);
     }
@@ -565,7 +615,7 @@ mod tests {
     fn format_counts() {
         same("{:10s}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
@@ -577,7 +627,7 @@ mod tests {
                })]);
         same("{:10$.10s}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
@@ -589,19 +639,19 @@ mod tests {
                })]);
         same("{:.*s}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(1),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
                        flags: 0,
-                       precision: CountIsNextParam,
+                       precision: CountIsParam(0),
                        width: CountImplied,
                        ty: "s",
                    },
                })]);
         same("{:.10$s}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
@@ -613,7 +663,7 @@ mod tests {
                })]);
         same("{:a$.b$s}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
@@ -628,7 +678,7 @@ mod tests {
     fn format_flags() {
         same("{:-}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,
@@ -640,7 +690,7 @@ mod tests {
                })]);
         same("{:+#}",
              &[NextArgument(Argument {
-                   position: ArgumentNext,
+                   position: ArgumentImplicitlyIs(0),
                    format: FormatSpec {
                        fill: None,
                        align: AlignUnknown,

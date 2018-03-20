@@ -11,8 +11,6 @@
 use graph::*;
 use std::fmt::Debug;
 
-type TestNode = Node<&'static str>;
-type TestEdge = Edge<&'static str>;
 type TestGraph = Graph<&'static str, &'static str>;
 
 fn create_graph() -> TestGraph {
@@ -20,10 +18,13 @@ fn create_graph() -> TestGraph {
 
     // Create a simple graph
     //
-    //    A -+> B --> C
-    //       |  |     ^
-    //       |  v     |
-    //       F  D --> E
+    //          F
+    //          |
+    //          V
+    //    A --> B --> C
+    //          |     ^
+    //          v     |
+    //          D --> E
 
     let a = graph.add_node("A");
     let b = graph.add_node("B");
@@ -58,7 +59,6 @@ fn each_edge() {
     let graph = create_graph();
     let expected = ["AB", "BC", "BD", "DE", "EC", "FB"];
     graph.each_edge(|idx, edge| {
-        assert_eq!(&expected[idx.0], graph.edge_data(idx));
         assert_eq!(expected[idx.0], edge.data);
         true
     });
@@ -73,7 +73,6 @@ fn test_adjacent_edges<N: PartialEq + Debug, E: PartialEq + Debug>(graph: &Graph
 
     let mut counter = 0;
     for (edge_index, edge) in graph.incoming_edges(start_index) {
-        assert!(graph.edge_data(edge_index) == &edge.data);
         assert!(counter < expected_incoming.len());
         debug!("counter={:?} expected={:?} edge_index={:?} edge={:?}",
                counter,
@@ -93,7 +92,6 @@ fn test_adjacent_edges<N: PartialEq + Debug, E: PartialEq + Debug>(graph: &Graph
 
     let mut counter = 0;
     for (edge_index, edge) in graph.outgoing_edges(start_index) {
-        assert!(graph.edge_data(edge_index) == &edge.data);
         assert!(counter < expected_outgoing.len());
         debug!("counter={:?} expected={:?} edge_index={:?} edge={:?}",
                counter,

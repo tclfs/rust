@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: -Z parse-only
+// compile-flags: -Z parse-only -Z continue-parse-after-error
 
 // ignore-tidy-cr
 
@@ -21,6 +21,12 @@ pub fn bar() {}
 //~^^ ERROR: bare CR not allowed in block doc-comment
 
 fn main() {
+    //! doc comment with bare CR: ''
+    //~^ ERROR: bare CR not allowed in doc-comment
+
+    /*! block doc comment with bare CR: '' */
+    //~^ ERROR: bare CR not allowed in block doc-comment
+
     // the following string literal has a bare CR in it
     let _s = "foobar"; //~ ERROR: bare CR not allowed in string
 

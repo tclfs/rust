@@ -9,20 +9,21 @@
 // except according to those terms.
 
 use syntax::ast;
-use syntax::codemap;
 use syntax::ext::base;
 use syntax::ext::build::AstBuilder;
-use syntax::parse::token;
+use syntax::symbol::Symbol;
+use syntax_pos;
+use syntax::tokenstream;
 
 use std::string::String;
 
 pub fn expand_syntax_ext(cx: &mut base::ExtCtxt,
-                         sp: codemap::Span,
-                         tts: &[ast::TokenTree])
-                         -> Box<base::MacResult+'static> {
+                         sp: syntax_pos::Span,
+                         tts: &[tokenstream::TokenTree])
+                         -> Box<base::MacResult + 'static> {
     let es = match base::get_exprs_from_tts(cx, sp, tts) {
         Some(e) => e,
-        None => return base::DummyResult::expr(sp)
+        None => return base::DummyResult::expr(sp),
     };
     let mut accumulator = String::new();
     for e in es {
@@ -32,7 +33,7 @@ pub fn expand_syntax_ext(cx: &mut base::ExtCtxt,
                     ast::LitKind::Str(ref s, _) |
                     ast::LitKind::Float(ref s, _) |
                     ast::LitKind::FloatUnsuffixed(ref s) => {
-                        accumulator.push_str(&s);
+                        accumulator.push_str(&s.as_str());
                     }
                     ast::LitKind::Char(c) => {
                         accumulator.push(c);
@@ -56,7 +57,6 @@ pub fn expand_syntax_ext(cx: &mut base::ExtCtxt,
             }
         }
     }
-    base::MacEager::expr(cx.expr_str(
-            sp,
-            token::intern_and_get_ident(&accumulator[..])))
+    let sp = sp.with_ctxt(sp.ctxt().apply_mark(cx.current_expansion.mark));
+    base::MacEager::expr(cx.expr_str(sp, Symbol::intern(&accumulator)))
 }

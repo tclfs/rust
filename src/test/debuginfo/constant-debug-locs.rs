@@ -15,13 +15,11 @@
 #![allow(dead_code, unused_variables)]
 #![feature(omit_gdb_pretty_printer_section)]
 #![omit_gdb_pretty_printer_section]
-#![feature(const_fn)]
 #![feature(static_mutex)]
 
 // This test makes sure that the compiler doesn't crash when trying to assign
 // debug locations to const-expressions.
 
-use std::sync::StaticMutex;
 use std::cell::UnsafeCell;
 
 const CONSTANT: u64 = 3 + 4;
@@ -63,6 +61,5 @@ fn main() {
     let mut _string = STRING;
     let mut _vec = VEC;
     let mut _nested = NESTED;
-    let mut _extern = StaticMutex::new();
     let mut _unsafe_cell = UNSAFE_CELL;
 }

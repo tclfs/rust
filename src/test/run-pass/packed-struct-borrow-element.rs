@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-emscripten weird assertion?
 
 #[repr(packed)]
 struct Foo {
@@ -17,7 +18,7 @@ struct Foo {
 
 pub fn main() {
     let foo = Foo { bar: 1, baz: 2 };
-    let brw = &foo.baz;
+    let brw = unsafe { &foo.baz };
 
     assert_eq!(*brw, 2);
 }

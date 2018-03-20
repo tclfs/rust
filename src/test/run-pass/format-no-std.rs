@@ -8,14 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(lang_items, start, collections)]
+// ignore-emscripten no no_std executables
+
+#![feature(lang_items, start, alloc)]
 #![no_std]
 
 extern crate std as other;
 
-#[macro_use] extern crate collections;
+#[macro_use] extern crate alloc;
 
-use collections::string::ToString;
+use alloc::string::ToString;
 
 #[start]
 fn start(_argc: isize, _argv: *const *const u8) -> isize {

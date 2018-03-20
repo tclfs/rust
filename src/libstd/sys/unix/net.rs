@@ -8,17 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-
 use ffi::CStr;
 use io;
-use libc::{self, c_int, size_t, sockaddr, socklen_t};
+use libc::{self, c_int, c_void, size_t, sockaddr, socklen_t, EAI_SYSTEM, MSG_PEEK};
+use mem;
 use net::{SocketAddr, Shutdown};
 use str;
 use sys::fd::FileDesc;
 use sys_common::{AsInner, FromInner, IntoInner};
-use sys_common::net::{getsockopt, setsockopt};
-use time::Duration;
+use sys_common::net::{getsockopt, setsockopt, sockaddr_to_addr};
+use time::{Duration, Instant};
+use cmp;
 
 pub use sys::{cvt, cvt_r};
 pub extern crate libc as netc;
@@ -35,12 +35,29 @@ use libc::SOCK_CLOEXEC;
 #[cfg(not(target_os = "linux"))]
 const SOCK_CLOEXEC: c_int = 0;
 
+// Another conditional contant for name resolution: Macos et iOS use
+// SO_NOSIGPIPE as a setsockopt flag to disable SIGPIPE emission on socket.
+// Other platforms do otherwise.
+#[cfg(target_vendor = "apple")]
+use libc::SO_NOSIGPIPE;
+#[cfg(not(target_vendor = "apple"))]
+const SO_NOSIGPIPE: c_int = 0;
+
 pub struct Socket(FileDesc);
 
 pub fn init() {}
 
 pub fn cvt_gai(err: c_int) -> io::Result<()> {
-    if err == 0 { return Ok(()) }
+    if err == 0 {
+        return Ok(())
+    }
+
+    // We may need to trigger a glibc workaround. See on_resolver_failure() for details.
+    on_resolver_failure();
+
+    if err == EAI_SYSTEM {
+        return Err(io::Error::last_os_error())
+    }
 
     let detail = unsafe {
         str::from_utf8(CStr::from_ptr(libc::gai_strerror(err)).to_bytes()).unwrap()
@@ -57,6 +74,10 @@ impl Socket {
             SocketAddr::V4(..) => libc::AF_INET,
             SocketAddr::V6(..) => libc::AF_INET6,
         };
+        Socket::new_raw(fam, ty)
+    }
+
+    pub fn new_raw(fam: c_int, ty: c_int) -> io::Result<Socket> {
         unsafe {
             // On linux we first attempt to pass the SOCK_CLOEXEC flag to
             // atomically create the socket and set it as CLOEXEC. Support for
@@ -71,10 +92,107 @@ impl Socket {
                 }
             }
 
-            let fd = try!(cvt(libc::socket(fam, ty, 0)));
+            let fd = cvt(libc::socket(fam, ty, 0))?;
             let fd = FileDesc::new(fd);
-            fd.set_cloexec();
-            Ok(Socket(fd))
+            fd.set_cloexec()?;
+            let socket = Socket(fd);
+            if cfg!(target_vendor = "apple") {
+                setsockopt(&socket, libc::SOL_SOCKET, SO_NOSIGPIPE, 1)?;
+            }
+            Ok(socket)
+        }
+    }
+
+    pub fn new_pair(fam: c_int, ty: c_int) -> io::Result<(Socket, Socket)> {
+        unsafe {
+            let mut fds = [0, 0];
+
+            // Like above, see if we can set cloexec atomically
+            if cfg!(target_os = "linux") {
+                match cvt(libc::socketpair(fam, ty | SOCK_CLOEXEC, 0, fds.as_mut_ptr())) {
+                    Ok(_) => {
+                        return Ok((Socket(FileDesc::new(fds[0])), Socket(FileDesc::new(fds[1]))));
+                    }
+                    Err(ref e) if e.raw_os_error() == Some(libc::EINVAL) => {},
+                    Err(e) => return Err(e),
+                }
+            }
+
+            cvt(libc::socketpair(fam, ty, 0, fds.as_mut_ptr()))?;
+            let a = FileDesc::new(fds[0]);
+            let b = FileDesc::new(fds[1]);
+            a.set_cloexec()?;
+            b.set_cloexec()?;
+            Ok((Socket(a), Socket(b)))
+        }
+    }
+
+    pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
+        self.set_nonblocking(true)?;
+        let r = unsafe {
+            let (addrp, len) = addr.into_inner();
+            cvt(libc::connect(self.0.raw(), addrp, len))
+        };
+        self.set_nonblocking(false)?;
+
+        match r {
+            Ok(_) => return Ok(()),
+            // there's no ErrorKind for EINPROGRESS :(
+            Err(ref e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+            Err(e) => return Err(e),
+        }
+
+        let mut pollfd = libc::pollfd {
+            fd: self.0.raw(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+
+        if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                      "cannot set a 0 duration timeout"));
+        }
+
+        let start = Instant::now();
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"));
+            }
+
+            let timeout = timeout - elapsed;
+            let mut timeout = timeout.as_secs()
+                .saturating_mul(1_000)
+                .saturating_add(timeout.subsec_nanos() as u64 / 1_000_000);
+            if timeout == 0 {
+                timeout = 1;
+            }
+
+            let timeout = cmp::min(timeout, c_int::max_value() as u64) as c_int;
+
+            match unsafe { libc::poll(&mut pollfd, 1, timeout) } {
+                -1 => {
+                    let err = io::Error::last_os_error();
+                    if err.kind() != io::ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                }
+                0 => {}
+                _ => {
+                    // linux returns POLLOUT|POLLERR|POLLHUP for refused connections (!), so look
+                    // for POLLHUP rather than read readiness
+                    if pollfd.revents & libc::POLLHUP != 0 {
+                        let e = self.take_error()?
+                            .unwrap_or_else(|| {
+                                io::Error::new(io::ErrorKind::Other, "no error set after POLLHUP")
+                            });
+                        return Err(e);
+                    }
+
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -100,11 +218,11 @@ impl Socket {
             }
         }
 
-        let fd = try!(cvt_r(|| unsafe {
+        let fd = cvt_r(|| unsafe {
             libc::accept(self.0.raw(), storage, len)
-        }));
+        })?;
         let fd = FileDesc::new(fd);
-        fd.set_cloexec();
+        fd.set_cloexec()?;
         Ok(Socket(fd))
     }
 
@@ -112,12 +230,50 @@ impl Socket {
         self.0.duplicate().map(Socket)
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+    fn recv_with_flags(&self, buf: &mut [u8], flags: c_int) -> io::Result<usize> {
+        let ret = cvt(unsafe {
+            libc::recv(self.0.raw(),
+                       buf.as_mut_ptr() as *mut c_void,
+                       buf.len(),
+                       flags)
+        })?;
+        Ok(ret as usize)
     }
 
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.0.read_to_end(buf)
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.recv_with_flags(buf, 0)
+    }
+
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.recv_with_flags(buf, MSG_PEEK)
+    }
+
+    fn recv_from_with_flags(&self, buf: &mut [u8], flags: c_int)
+                            -> io::Result<(usize, SocketAddr)> {
+        let mut storage: libc::sockaddr_storage = unsafe { mem::zeroed() };
+        let mut addrlen = mem::size_of_val(&storage) as libc::socklen_t;
+
+        let n = cvt(unsafe {
+            libc::recvfrom(self.0.raw(),
+                        buf.as_mut_ptr() as *mut c_void,
+                        buf.len(),
+                        flags,
+                        &mut storage as *mut _ as *mut _,
+                        &mut addrlen)
+        })?;
+        Ok((n as usize, sockaddr_to_addr(&storage, addrlen as usize)?))
+    }
+
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.recv_from_with_flags(buf, 0)
+    }
+
+    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.recv_from_with_flags(buf, MSG_PEEK)
+    }
+
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
     }
 
     pub fn set_timeout(&self, dur: Option<Duration>, kind: libc::c_int) -> io::Result<()> {
@@ -153,7 +309,7 @@ impl Socket {
     }
 
     pub fn timeout(&self, kind: libc::c_int) -> io::Result<Option<Duration>> {
-        let raw: libc::timeval = try!(getsockopt(self, libc::SOL_SOCKET, kind));
+        let raw: libc::timeval = getsockopt(self, libc::SOL_SOCKET, kind)?;
         if raw.tv_sec == 0 && raw.tv_usec == 0 {
             Ok(None)
         } else {
@@ -169,7 +325,7 @@ impl Socket {
             Shutdown::Read => libc::SHUT_RD,
             Shutdown::Both => libc::SHUT_RDWR,
         };
-        try!(cvt(unsafe { libc::shutdown(self.0.raw(), how) }));
+        cvt(unsafe { libc::shutdown(self.0.raw(), how) })?;
         Ok(())
     }
 
@@ -178,13 +334,22 @@ impl Socket {
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        let raw: c_int = try!(getsockopt(self, libc::IPPROTO_TCP, libc::TCP_NODELAY));
+        let raw: c_int = getsockopt(self, libc::IPPROTO_TCP, libc::TCP_NODELAY)?;
         Ok(raw != 0)
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        let mut nonblocking = nonblocking as libc::c_ulong;
+        let mut nonblocking = nonblocking as libc::c_int;
         cvt(unsafe { libc::ioctl(*self.as_inner(), libc::FIONBIO, &mut nonblocking) }).map(|_| ())
+    }
+
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        let raw: c_int = getsockopt(self, libc::SOL_SOCKET, libc::SO_ERROR)?;
+        if raw == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(io::Error::from_raw_os_error(raw as i32)))
+        }
     }
 }
 
@@ -198,4 +363,85 @@ impl FromInner<c_int> for Socket {
 
 impl IntoInner<c_int> for Socket {
     fn into_inner(self) -> c_int { self.0.into_raw() }
+}
+
+// In versions of glibc prior to 2.26, there's a bug where the DNS resolver
+// will cache the contents of /etc/resolv.conf, so changes to that file on disk
+// can be ignored by a long-running program. That can break DNS lookups on e.g.
+// laptops where the network comes and goes. See
+// https://sourceware.org/bugzilla/show_bug.cgi?id=984. Note however that some
+// distros including Debian have patched glibc to fix this for a long time.
+//
+// A workaround for this bug is to call the res_init libc function, to clear
+// the cached configs. Unfortunately, while we believe glibc's implementation
+// of res_init is thread-safe, we know that other implementations are not
+// (https://github.com/rust-lang/rust/issues/43592). Code here in libstd could
+// try to synchronize its res_init calls with a Mutex, but that wouldn't
+// protect programs that call into libc in other ways. So instead of calling
+// res_init unconditionally, we call it only when we detect we're linking
+// against glibc version < 2.26. (That is, when we both know its needed and
+// believe it's thread-safe).
+#[cfg(target_env = "gnu")]
+fn on_resolver_failure() {
+    // If the version fails to parse, we treat it the same as "not glibc".
+    if let Some(Ok(version_str)) = glibc_version_cstr().map(CStr::to_str) {
+        if let Some(version) = parse_glibc_version(version_str) {
+            if version < (2, 26) {
+                unsafe { libc::res_init() };
+            }
+        }
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn on_resolver_failure() {}
+
+#[cfg(target_env = "gnu")]
+fn glibc_version_cstr() -> Option<&'static CStr> {
+    weak! {
+        fn gnu_get_libc_version() -> *const libc::c_char
+    }
+    if let Some(f) = gnu_get_libc_version.get() {
+        unsafe { Some(CStr::from_ptr(f())) }
+    } else {
+        None
+    }
+}
+
+// Returns Some((major, minor)) if the string is a valid "x.y" version,
+// ignoring any extra dot-separated parts. Otherwise return None.
+#[cfg(target_env = "gnu")]
+fn parse_glibc_version(version: &str) -> Option<(usize, usize)> {
+    let mut parsed_ints = version.split(".").map(str::parse::<usize>).fuse();
+    match (parsed_ints.next(), parsed_ints.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => Some((major, minor)),
+        _ => None
+    }
+}
+
+#[cfg(all(test, taget_env = "gnu"))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_res_init() {
+        // This mostly just tests that the weak linkage doesn't panic wildly...
+        res_init_if_glibc_before_2_26().unwrap();
+    }
+
+    #[test]
+    fn test_parse_glibc_version() {
+        let cases = [
+            ("0.0", Some((0, 0))),
+            ("01.+2", Some((1, 2))),
+            ("3.4.5.six", Some((3, 4))),
+            ("1", None),
+            ("1.-2", None),
+            ("1.foo", None),
+            ("foo.1", None),
+        ];
+        for &(version_str, parsed) in cases.iter() {
+            assert_eq!(parsed, parse_glibc_version(version_str));
+        }
+    }
 }

@@ -9,8 +9,8 @@
 // except according to those terms.
 
 use std::fmt;
-use std::io::prelude::*;
 use std::io;
+use std::path::PathBuf;
 
 use externalfiles::ExternalHtml;
 
@@ -20,19 +20,20 @@ pub struct Layout {
     pub favicon: String,
     pub external_html: ExternalHtml,
     pub krate: String,
-    pub playground_url: String,
 }
 
 pub struct Page<'a> {
     pub title: &'a str,
-    pub ty: &'a str,
+    pub css_class: &'a str,
     pub root_path: &'a str,
     pub description: &'a str,
-    pub keywords: &'a str
+    pub keywords: &'a str,
+    pub resource_suffix: &'a str,
 }
 
 pub fn render<T: fmt::Display, S: fmt::Display>(
-    dst: &mut io::Write, layout: &Layout, page: &Page, sidebar: &S, t: &T)
+    dst: &mut io::Write, layout: &Layout, page: &Page, sidebar: &S, t: &T,
+    css_file_extension: bool, themes: &[PathBuf])
     -> io::Result<()>
 {
     write!(dst,
@@ -47,13 +48,19 @@ r##"<!DOCTYPE html>
 
     <title>{title}</title>
 
-    <link rel="stylesheet" type="text/css" href="{root_path}rustdoc.css">
-    <link rel="stylesheet" type="text/css" href="{root_path}main.css">
+    <link rel="stylesheet" type="text/css" href="{root_path}normalize{suffix}.css">
+    <link rel="stylesheet" type="text/css" href="{root_path}rustdoc{suffix}.css"
+          id="mainThemeStyle">
+    {themes}
+    <link rel="stylesheet" type="text/css" href="{root_path}dark{suffix}.css">
+    <link rel="stylesheet" type="text/css" href="{root_path}main{suffix}.css" id="themeStyle">
+    <script src="{root_path}storage{suffix}.js"></script>
+    {css_extension}
 
     {favicon}
     {in_header}
 </head>
-<body class="rustdoc">
+<body class="rustdoc {css_class}">
     <!--[if lte IE 8]>
     <div class="warning">
         This old browser is unsupported and will most likely display funky
@@ -64,10 +71,18 @@ r##"<!DOCTYPE html>
     {before_content}
 
     <nav class="sidebar">
+        <div class="sidebar-menu">&#9776;</div>
         {logo}
         {sidebar}
     </nav>
 
+    <div class="theme-picker">
+        <button id="theme-picker" aria-label="Pick another theme!">
+            <img src="{root_path}brush{suffix}.svg" width="18" alt="Pick another theme!">
+        </button>
+        <div id="theme-choices"></div>
+    </div>
+    <script src="{root_path}theme{suffix}.js"></script>
     <nav class="sub">
         <form class="search-form js-only">
             <div class="search-container">
@@ -79,7 +94,7 @@ r##"<!DOCTYPE html>
         </form>
     </nav>
 
-    <section id='main' class="content {ty}">{content}</section>
+    <section id='main' class="content">{content}</section>
     <section id='search' class="content hidden"></section>
 
     <section class="footer"></section>
@@ -92,16 +107,22 @@ r##"<!DOCTYPE html>
                 <h2>Keyboard Shortcuts</h2>
 
                 <dl>
-                    <dt>?</dt>
+                    <dt><kbd>?</kbd></dt>
                     <dd>Show this help dialog</dd>
-                    <dt>S</dt>
+                    <dt><kbd>S</kbd></dt>
                     <dd>Focus the search field</dd>
-                    <dt>&larrb;</dt>
+                    <dt><kbd>↑</kbd></dt>
                     <dd>Move up in search results</dd>
-                    <dt>&rarrb;</dt>
+                    <dt><kbd>↓</kbd></dt>
                     <dd>Move down in search results</dd>
-                    <dt>&#9166;</dt>
+                    <dt><kbd>↹</kbd></dt>
+                    <dd>Switch tab</dd>
+                    <dt><kbd>&#9166;</kbd></dt>
                     <dd>Go to active search result</dd>
+                    <dt><kbd>+</kbd></dt>
+                    <dd>Expand all sections</dd>
+                    <dt><kbd>-</kbd></dt>
+                    <dd>Collapse all sections</dd>
                 </dl>
             </div>
 
@@ -133,17 +154,21 @@ r##"<!DOCTYPE html>
     <script>
         window.rootPath = "{root_path}";
         window.currentCrate = "{krate}";
-        window.playgroundUrl = "{play_url}";
     </script>
-    <script src="{root_path}jquery.js"></script>
-    <script src="{root_path}main.js"></script>
-    {play_js}
+    <script src="{root_path}main{suffix}.js"></script>
     <script defer src="{root_path}search-index.js"></script>
 </body>
 </html>"##,
+    css_extension = if css_file_extension {
+        format!("<link rel=\"stylesheet\" type=\"text/css\" href=\"{root_path}theme{suffix}.css\">",
+                root_path = page.root_path,
+                suffix=page.resource_suffix)
+    } else {
+        "".to_owned()
+    },
     content   = *t,
     root_path = page.root_path,
-    ty        = page.ty,
+    css_class = page.css_class,
     logo      = if layout.logo.is_empty() {
         "".to_string()
     } else {
@@ -165,12 +190,14 @@ r##"<!DOCTYPE html>
     after_content = layout.external_html.after_content,
     sidebar   = *sidebar,
     krate     = layout.krate,
-    play_url  = layout.playground_url,
-    play_js   = if layout.playground_url.is_empty() {
-        "".to_string()
-    } else {
-        format!(r#"<script src="{}playpen.js"></script>"#, page.root_path)
-    },
+    themes = themes.iter()
+                   .filter_map(|t| t.file_stem())
+                   .filter_map(|t| t.to_str())
+                   .map(|t| format!(r#"<link rel="stylesheet" type="text/css" href="{}{}">"#,
+                                    page.root_path,
+                                    t.replace(".css", &format!("{}.css", page.resource_suffix))))
+                   .collect::<String>(),
+    suffix=page.resource_suffix,
     )
 }
 

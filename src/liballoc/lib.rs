@@ -1,4 +1,4 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2014-2017 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,17 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # The Rust core allocation library
+//! # The Rust core allocation and collections library
 //!
-//! This is the lowest level library through which allocation in Rust can be
-//! performed.
+//! This library provides smart pointers and collections for managing
+//! heap-allocated values.
 //!
 //! This library, like libcore, is not intended for general usage, but rather as
 //! a building block of other libraries. The types and interfaces in this
-//! library are reexported through the [standard library](../std/index.html),
+//! library are re-exported through the [standard library](../std/index.html),
 //! and should not be used through this library.
-//!
-//! Currently, there are four major definitions in this library.
 //!
 //! ## Boxed values
 //!
@@ -47,17 +45,21 @@
 //! that the contained type `T` is shareable. Additionally, `Arc<T>` is itself
 //! sendable while `Rc<T>` is not.
 //!
-//! This types allows for shared access to the contained data, and is often
+//! This type allows for shared access to the contained data, and is often
 //! paired with synchronization primitives such as mutexes to allow mutation of
 //! shared resources.
+//!
+//! ## Collections
+//!
+//! Implementations of the most common general purpose data structures are
+//! defined in this library. They are re-exported through the
+//! [standard collections library](../std/collections/index.html).
 //!
 //! ## Heap interfaces
 //!
 //! The [`heap`](heap/index.html) module defines the low-level interface to the
 //! default global allocator. It is not compatible with the libc allocator API.
 
-#![crate_name = "alloc"]
-#![crate_type = "rlib"]
 #![allow(unused_attributes)]
 #![unstable(feature = "alloc",
             reason = "this library is unlikely to be stabilized in its current \
@@ -70,28 +72,61 @@
        test(no_crate_inject, attr(allow(unused_variables), deny(warnings))))]
 #![no_std]
 #![needs_allocator]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
+#![deny(missing_debug_implementations)]
 
-#![feature(allocator)]
+#![cfg_attr(test, allow(deprecated))] // rand
+#![cfg_attr(test, feature(placement_in))]
+#![cfg_attr(not(test), feature(core_float))]
+#![cfg_attr(not(test), feature(exact_size_is_empty))]
+#![cfg_attr(not(test), feature(generator_trait))]
+#![cfg_attr(test, feature(rand, test))]
+#![feature(allow_internal_unstable)]
+#![feature(ascii_ctype)]
+#![feature(box_into_raw_non_null)]
+#![feature(box_patterns)]
 #![feature(box_syntax)]
+#![feature(cfg_target_has_atomic)]
 #![feature(coerce_unsized)]
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
 #![feature(custom_attribute)]
-#![feature(dropck_parametricity)]
+#![feature(dropck_eyepatch)]
+#![feature(exact_size_is_empty)]
+#![feature(fmt_internals)]
+#![feature(from_ref)]
 #![feature(fundamental)]
+#![feature(generic_param_attrs)]
+#![feature(i128_type)]
+#![feature(iter_rfold)]
 #![feature(lang_items)]
 #![feature(needs_allocator)]
+#![feature(nonzero)]
+#![feature(offset_to)]
 #![feature(optin_builtin_traits)]
+#![feature(pattern)]
+#![feature(pin)]
 #![feature(placement_in_syntax)]
-#![feature(shared)]
+#![feature(placement_new_protocol)]
+#![feature(ptr_internals)]
+#![feature(rustc_attrs)]
+#![feature(slice_get_slice)]
+#![feature(slice_rsplit)]
+#![feature(specialization)]
 #![feature(staged_api)]
+#![feature(str_internals)]
+#![feature(trusted_len)]
+#![feature(try_reserve)]
 #![feature(unboxed_closures)]
-#![feature(unique)]
-#![feature(unsafe_no_drop_flag, filling_drop)]
+#![feature(unicode)]
 #![feature(unsize)]
+#![feature(allocator_internals)]
+#![feature(on_unimplemented)]
+#![feature(exact_chunks)]
+#![feature(pointer_methods)]
+#![feature(inclusive_range_fields)]
 
-#![cfg_attr(not(test), feature(raw, fn_traits, placement_new_protocol))]
+#![cfg_attr(not(test), feature(fn_traits, placement_new_protocol, swap_with_slice, i128))]
 #![cfg_attr(test, feature(test, box_heap))]
 
 // Allow testing this library
@@ -99,6 +134,20 @@
 #[cfg(test)]
 #[macro_use]
 extern crate std;
+#[cfg(test)]
+extern crate test;
+#[cfg(test)]
+extern crate rand;
+
+extern crate std_unicode;
+
+// Module with internal macros used by other modules (needs to be included before other modules).
+#[macro_use]
+mod macros;
+
+// Allocator trait and helper struct definitions
+
+pub mod allocator;
 
 // Heaps provided for low-level allocation strategies
 
@@ -114,13 +163,116 @@ pub mod heap;
 pub mod boxed;
 #[cfg(test)]
 mod boxed {
-    pub use std::boxed::{Box, HEAP};
+    pub use std::boxed::{Box, IntermediateBox, HEAP};
 }
 #[cfg(test)]
 mod boxed_test;
+#[cfg(target_has_atomic = "ptr")]
 pub mod arc;
 pub mod rc;
 pub mod raw_vec;
-pub mod oom;
 
-pub use oom::oom;
+// collections modules
+pub mod binary_heap;
+mod btree;
+pub mod borrow;
+pub mod fmt;
+pub mod linked_list;
+pub mod range;
+pub mod slice;
+pub mod str;
+pub mod string;
+pub mod vec;
+pub mod vec_deque;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+pub mod btree_map {
+    //! A map based on a B-Tree.
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub use btree::map::*;
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+pub mod btree_set {
+    //! A set based on a B-Tree.
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub use btree::set::*;
+}
+
+#[cfg(not(test))]
+mod std {
+    pub use core::ops;      // RangeFull
+}
+
+/// An endpoint of a range of keys.
+///
+/// # Examples
+///
+/// `Bound`s are range endpoints:
+///
+/// ```
+/// #![feature(collections_range)]
+///
+/// use std::collections::range::RangeArgument;
+/// use std::collections::Bound::*;
+///
+/// assert_eq!((..100).start(), Unbounded);
+/// assert_eq!((1..12).start(), Included(&1));
+/// assert_eq!((1..12).end(), Excluded(&12));
+/// ```
+///
+/// Using a tuple of `Bound`s as an argument to [`BTreeMap::range`].
+/// Note that in most cases, it's better to use range syntax (`1..5`) instead.
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use std::collections::Bound::{Excluded, Included, Unbounded};
+///
+/// let mut map = BTreeMap::new();
+/// map.insert(3, "a");
+/// map.insert(5, "b");
+/// map.insert(8, "c");
+///
+/// for (key, value) in map.range((Excluded(3), Included(8))) {
+///     println!("{}: {}", key, value);
+/// }
+///
+/// assert_eq!(Some((&3, &"a")), map.range((Unbounded, Included(5))).next());
+/// ```
+///
+/// [`BTreeMap::range`]: btree_map/struct.BTreeMap.html#method.range
+#[stable(feature = "collections_bound", since = "1.17.0")]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Bound<T> {
+    /// An inclusive bound.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
+    Included(#[stable(feature = "collections_bound", since = "1.17.0")] T),
+    /// An exclusive bound.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
+    Excluded(#[stable(feature = "collections_bound", since = "1.17.0")] T),
+    /// An infinite endpoint. Indicates that there is no bound in this direction.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
+    Unbounded,
+}
+
+/// An intermediate trait for specialization of `Extend`.
+#[doc(hidden)]
+trait SpecExtend<I: IntoIterator> {
+    /// Extends `self` with the contents of the given iterator.
+    fn spec_extend(&mut self, iter: I);
+}
+
+#[doc(no_inline)]
+pub use binary_heap::BinaryHeap;
+#[doc(no_inline)]
+pub use btree_map::BTreeMap;
+#[doc(no_inline)]
+pub use btree_set::BTreeSet;
+#[doc(no_inline)]
+pub use linked_list::LinkedList;
+#[doc(no_inline)]
+pub use vec_deque::VecDeque;
+#[doc(no_inline)]
+pub use string::String;
+#[doc(no_inline)]
+pub use vec::Vec;

@@ -198,14 +198,20 @@ fn _11() {
                 };
     let _ = #[attr] || #[attr] ();
     let _ = #[attr] move || #[attr] ();
-    let _ = #[attr] || {
-        #![attr]
-        #[attr]
-        () };
-    let _ = #[attr] move || {
-        #![attr]
-        #[attr]
-        () };
+    let _ =
+        #[attr] ||
+                    {
+                        #![attr]
+                        #[attr]
+                        ()
+                    };
+    let _ =
+        #[attr] move ||
+                    {
+                        #![attr]
+                        #[attr]
+                        ()
+                    };
     let _ =
         #[attr] {
                     #![attr]
@@ -249,7 +255,7 @@ fn _11() {
     while true { let _ = #[attr] break ; }
     || #[attr] return;
     let _ = #[attr] expr_mac!();
-    /* FIXME: pp bug, loosing delimiter styles
+    /* FIXME: pp bug, losing delimiter styles
     let _ = #[attr] expr_mac![];
     let _ = #[attr] expr_mac!{};
     */

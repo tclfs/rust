@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Implementations of serialization for structures found in libcollections
+//! Implementations of serialization for structures found in liballoc
 
 use std::hash::{Hash, BuildHasher};
-use std::mem;
 
 use {Decodable, Encodable, Decoder, Encoder};
 use std::collections::{LinkedList, VecDeque, BTreeMap, BTreeSet, HashMap, HashSet};
-use collections::enum_set::{EnumSet, CLike};
+use std::rc::Rc;
+use std::sync::Arc;
 
 impl<
     T: Encodable
@@ -23,7 +23,7 @@ impl<
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_seq(self.len(), |s| {
             for (i, e) in self.iter().enumerate() {
-                try!(s.emit_seq_elt(i, |s| e.encode(s)));
+                s.emit_seq_elt(i, |s| e.encode(s))?;
             }
             Ok(())
         })
@@ -35,7 +35,7 @@ impl<T:Decodable> Decodable for LinkedList<T> {
         d.read_seq(|d, len| {
             let mut list = LinkedList::new();
             for i in 0..len {
-                list.push_back(try!(d.read_seq_elt(i, |d| Decodable::decode(d))));
+                list.push_back(d.read_seq_elt(i, |d| Decodable::decode(d))?);
             }
             Ok(list)
         })
@@ -46,7 +46,7 @@ impl<T: Encodable> Encodable for VecDeque<T> {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_seq(self.len(), |s| {
             for (i, e) in self.iter().enumerate() {
-                try!(s.emit_seq_elt(i, |s| e.encode(s)));
+                s.emit_seq_elt(i, |s| e.encode(s))?;
             }
             Ok(())
         })
@@ -58,7 +58,7 @@ impl<T:Decodable> Decodable for VecDeque<T> {
         d.read_seq(|d, len| {
             let mut deque: VecDeque<T> = VecDeque::new();
             for i in 0..len {
-                deque.push_back(try!(d.read_seq_elt(i, |d| Decodable::decode(d))));
+                deque.push_back(d.read_seq_elt(i, |d| Decodable::decode(d))?);
             }
             Ok(deque)
         })
@@ -73,8 +73,8 @@ impl<
         e.emit_map(self.len(), |e| {
             let mut i = 0;
             for (key, val) in self {
-                try!(e.emit_map_elt_key(i, |e| key.encode(e)));
-                try!(e.emit_map_elt_val(i, |e| val.encode(e)));
+                e.emit_map_elt_key(i, |e| key.encode(e))?;
+                e.emit_map_elt_val(i, |e| val.encode(e))?;
                 i += 1;
             }
             Ok(())
@@ -90,8 +90,8 @@ impl<
         d.read_map(|d, len| {
             let mut map = BTreeMap::new();
             for i in 0..len {
-                let key = try!(d.read_map_elt_key(i, |d| Decodable::decode(d)));
-                let val = try!(d.read_map_elt_val(i, |d| Decodable::decode(d)));
+                let key = d.read_map_elt_key(i, |d| Decodable::decode(d))?;
+                let val = d.read_map_elt_val(i, |d| Decodable::decode(d))?;
                 map.insert(key, val);
             }
             Ok(map)
@@ -106,7 +106,7 @@ impl<
         s.emit_seq(self.len(), |s| {
             let mut i = 0;
             for e in self {
-                try!(s.emit_seq_elt(i, |s| e.encode(s)));
+                s.emit_seq_elt(i, |s| e.encode(s))?;
                 i += 1;
             }
             Ok(())
@@ -121,37 +121,10 @@ impl<
         d.read_seq(|d, len| {
             let mut set = BTreeSet::new();
             for i in 0..len {
-                set.insert(try!(d.read_seq_elt(i, |d| Decodable::decode(d))));
+                set.insert(d.read_seq_elt(i, |d| Decodable::decode(d))?);
             }
             Ok(set)
         })
-    }
-}
-
-impl<
-    T: Encodable + CLike
-> Encodable for EnumSet<T> {
-    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        let mut bits = 0;
-        for item in self {
-            bits |= item.to_usize();
-        }
-        s.emit_uint(bits)
-    }
-}
-
-impl<
-    T: Decodable + CLike
-> Decodable for EnumSet<T> {
-    fn decode<D: Decoder>(d: &mut D) -> Result<EnumSet<T>, D::Error> {
-        let bits = try!(d.read_uint());
-        let mut set = EnumSet::new();
-        for bit in 0..(mem::size_of::<usize>()*8) {
-            if bits & (1 << bit) != 0 {
-                set.insert(CLike::from_usize(1 << bit));
-            }
-        }
-        Ok(set)
     }
 }
 
@@ -164,8 +137,8 @@ impl<K, V, S> Encodable for HashMap<K, V, S>
         e.emit_map(self.len(), |e| {
             let mut i = 0;
             for (key, val) in self {
-                try!(e.emit_map_elt_key(i, |e| key.encode(e)));
-                try!(e.emit_map_elt_val(i, |e| val.encode(e)));
+                e.emit_map_elt_key(i, |e| key.encode(e))?;
+                e.emit_map_elt_val(i, |e| val.encode(e))?;
                 i += 1;
             }
             Ok(())
@@ -183,8 +156,8 @@ impl<K, V, S> Decodable for HashMap<K, V, S>
             let state = Default::default();
             let mut map = HashMap::with_capacity_and_hasher(len, state);
             for i in 0..len {
-                let key = try!(d.read_map_elt_key(i, |d| Decodable::decode(d)));
-                let val = try!(d.read_map_elt_val(i, |d| Decodable::decode(d)));
+                let key = d.read_map_elt_key(i, |d| Decodable::decode(d))?;
+                let val = d.read_map_elt_val(i, |d| Decodable::decode(d))?;
                 map.insert(key, val);
             }
             Ok(map)
@@ -200,7 +173,7 @@ impl<T, S> Encodable for HashSet<T, S>
         s.emit_seq(self.len(), |s| {
             let mut i = 0;
             for e in self {
-                try!(s.emit_seq_elt(i, |s| e.encode(s)));
+                s.emit_seq_elt(i, |s| e.encode(s))?;
                 i += 1;
             }
             Ok(())
@@ -217,9 +190,55 @@ impl<T, S> Decodable for HashSet<T, S>
             let state = Default::default();
             let mut set = HashSet::with_capacity_and_hasher(len, state);
             for i in 0..len {
-                set.insert(try!(d.read_seq_elt(i, |d| Decodable::decode(d))));
+                set.insert(d.read_seq_elt(i, |d| Decodable::decode(d))?);
             }
             Ok(set)
+        })
+    }
+}
+
+impl<T: Encodable> Encodable for Rc<[T]> {
+    fn encode<E: Encoder>(&self, s: &mut E) -> Result<(), E::Error> {
+        s.emit_seq(self.len(), |s| {
+            for (index, e) in self.iter().enumerate() {
+                s.emit_seq_elt(index, |s| e.encode(s))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<T: Decodable> Decodable for Rc<[T]> {
+    fn decode<D: Decoder>(d: &mut D) -> Result<Rc<[T]>, D::Error> {
+        d.read_seq(|d, len| {
+            let mut vec = Vec::with_capacity(len);
+            for index in 0..len {
+                vec.push(d.read_seq_elt(index, |d| Decodable::decode(d))?);
+            }
+            Ok(vec.into())
+        })
+    }
+}
+
+impl<T: Encodable> Encodable for Arc<[T]> {
+    fn encode<E: Encoder>(&self, s: &mut E) -> Result<(), E::Error> {
+        s.emit_seq(self.len(), |s| {
+            for (index, e) in self.iter().enumerate() {
+                s.emit_seq_elt(index, |s| e.encode(s))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<T: Decodable> Decodable for Arc<[T]> {
+    fn decode<D: Decoder>(d: &mut D) -> Result<Arc<[T]>, D::Error> {
+        d.read_seq(|d, len| {
+            let mut vec = Vec::with_capacity(len);
+            for index in 0..len {
+                vec.push(d.read_seq_elt(index, |d| Decodable::decode(d))?);
+            }
+            Ok(vec.into())
         })
     }
 }
